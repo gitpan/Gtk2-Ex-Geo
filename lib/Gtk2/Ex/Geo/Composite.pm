@@ -12,6 +12,7 @@ BEGIN {
     our @EXPORT = qw();
     our @EXPORT_OK = qw();
     our %EXPORT_TAGS = ( FIELDS => [ @EXPORT_OK, @EXPORT ] );
+    our $VERSION = '0.43';
 }
 
 =pod

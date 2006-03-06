@@ -9,6 +9,8 @@ use Gtk2;
 use Geo::Raster;
 use Gtk2::Ex::Geo::Renderer;
 
+our $VERSION = '0.43';
+
 =pod
 
 =head1 NAME
