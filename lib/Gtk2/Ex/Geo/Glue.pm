@@ -3,21 +3,31 @@ package Gtk2::Ex::Geo::Glue;
 #use strict; # BAAAD thing but we need eval below...
 use warnings;
 use Carp;
+use File::Basename;
 use Term::ReadLine;
 use Glib qw/TRUE FALSE/;
 use Gtk2;
 use Geo::Raster;
-use Geo::Shapelib;
+use Geo::Vector;
+use gdal;
+use ogr;
+use Gtk2::GladeXML;
+use Gtk2::Ex::Geo::Composite;
 use Gtk2::Ex::Geo::Overlay;
+use Gtk2::Ex::Geo::OGRDialog;
+use Gtk2::Ex::Geo::GDALDialog;
+
+use Data::TreeDumper::Renderer::GTK;
 
 BEGIN {
     use Exporter "import";
     our @EXPORT = qw();
     our @EXPORT_OK = qw();
     our %EXPORT_TAGS = ( FIELDS => [ @EXPORT_OK, @EXPORT ] );
+    gdal::AllRegister;
+    ogr::RegisterAll();
+    gdal::UseExceptions();
 }
-
-our $VERSION = '0.31';
 
 # Preloaded methods go here.
 
@@ -27,34 +37,29 @@ our $VERSION = '0.31';
 
 =head1 NAME
 
-Gtk2::Ex::Geo::Glue - Some of the pieces of a GIS
-
-=head1 SYNOPSIS
-
-Look at the test code for an example.
-
-=head1 GUI
-
-The GUI is rather simple but hopefully usable and extendable.
+Gtk2::Ex::Geo::Glue - Module for glueing widgets into a GIS.
 
 =head1 METHODS
 
 =head2 new
 
-no parameters (todo: treestore columns should be parameters)
+    $gis = new Gtk2::Ex::Geo::Glue (history=>\@history,
+    resources=>$resources);
 
-creates toolbar, entry, model, tree_view and overlay widgets
+Creates toolbar, entry, model, tree_view and overlay widgets and
+stores them into the object.
 
 =cut
 
 sub new {
-    my($class) = @_;
+    my $class = shift;
+    my %opt = @_;
 
     my @columns = qw /name type ? a/;
     
     my $model = Gtk2::TreeStore->new(qw/Glib::String Glib::String Glib::String Glib::String/);
 
-    my $tree_view = Gtk2::TreeView->new($model);
+    my $tree_view = Gtk2::TreeView->new($model);    
 
     my $i = 0;
     foreach my $column (@columns) {
@@ -70,10 +75,41 @@ sub new {
 		 tree_view => $tree_view, 
 		 overlay => $overlay };
 
+    $self->{history} = $opt{history};
+    $self->{history_index} = $#{$self->{history}};
+    unless ($self->{history}->[$self->{history_index}] eq '') {
+	push @{$self->{history}}, '';
+	$self->{history_index}++;
+    }
+
+    $self->{resources} = $opt{resources};
+
+    my @buffer = <DATA>;
+    $self->{glade} = Gtk2::GladeXML->new_from_buffer("@buffer");
+    my $dialog = $self->{glade}->get_widget('dialog1');
+    my $close = $self->{glade}->get_widget('closebutton1');
+    $close->signal_connect(clicked => 
+			   sub {
+			       @{$self->{dialog1_position}} = $dialog->get_position;
+			       $dialog->hide;
+			    });
+
+    $tree_view->signal_connect(button_press_event => \&layer_menu, $self);
+
     $overlay->set_event_handler(\&event_handler,$self);
     $overlay->set_draw_on(\&draw_on,$self);
 
     $self->{toolbar} = toolbar($self);
+
+
+    my $folder;
+    chomp ($folder = `pwd`);
+    $folder .= '/';
+    $self->{add_from_folder} = $folder;
+
+    $self->{ogr_dialog} = new Gtk2::Ex::Geo::OGRDialog(%$self);
+
+    $self->{gdal_dialog} = new Gtk2::Ex::Geo::GDALDialog();
 
     $self->{entry} = Gtk2::Entry->new();
 
@@ -82,31 +118,161 @@ sub new {
     bless($self, $class); 
 }
 
-=pod
+sub layer_menu {
+    my($tv,$event,$self) = @_;
 
-=head2 add_history(\@history)
+    my @res = $self->{tree_view}->get_path_at_pos($event->x,$event->y);
+    return unless defined $res[0];
 
-@history is a history for the entry
+    my $layer = $self->{overlay}->get_layer_by_index($res[0]->to_string); 
+    return unless $layer;
 
-=cut
+    my $column = $res[1]->get_title;
+    
+    if ($event->button == 3) {
 
-sub add_history {
-    my($self,$history) = @_;
-    $self->{history} = $history;
-    $self->{history_index} = @$history;
+	my $menu = Gtk2::Menu->new;
+
+	my $hide = $layer->{hidden} ? '_Show' : '_Hide';
+	
+	my @data = ('_Zoom to','_Up','_Down',$hide,'_Remove');
+	
+	if (ref($layer) eq 'Geo::Vector') {
+	    push @data, ('','_Features...','_Vertices...','R_asterize...');
+	    push @data, ('','C_olor...','_Colors...');
+	} elsif (ref($layer) eq 'Geo::Raster') {
+	    push @data, ('','C_lip...') if $layer->{GDAL};
+	    push @data, ('','_Colors...');
+	}
+	push @data, ('_Inspect...','_Properties...');
+	
+	for (my $i = 0 ; $i < @data ; $i++) {
+	    if ($data[$i] eq '') {
+		my $item = Gtk2::SeparatorMenuItem->new();
+		$item->show;
+		$menu->append ($item);
+		next;
+	    }
+	    my $item = Gtk2::MenuItem->new ($data[$i]);
+	    $item->show;
+	    $menu->append ($item);
+	    $item->{index} = $i;
+	    $item->{text} = $data[$i];
+	    $item->signal_connect(activate => \&layer_menu_item, [$self, $data[$i]]);
+	}
+	$menu->popup(undef, undef, undef, undef, $event->button, $event->time);
+
+    } elsif ($column eq '?') {
+
+	$layer->{hidden} = !$layer->{hidden};
+	$self->update;
+	$self->{overlay}->render;
+
+    }
+
+    return 0;
 }
 
-=pod
-
-=head2 @history = get_history()
-
-@history is the history from the entry
-
-=cut
-
-sub get_history {
-    my($self) = @_;
-    return @{$self->{history}};
+sub layer_menu_item {
+    my ($item, $info) = @_;
+    my $self = shift @$info;
+    $_ = shift @$info;
+    $_ =~ s/_//g;
+    my $layer = $self->get_selected_layer();
+  SWITCH: {
+      if (/Zoom to/) {
+	  $self->{overlay}->zoom_to($layer);
+	  last SWITCH; 
+      }
+      if (/Up/) {
+	  $self->move_up();
+	  last SWITCH; 
+      }
+      if (/Down/) {
+	  $self->move_down();
+	  last SWITCH; 
+      }
+      if (/(Show)|(Hide)/) {
+	  $layer->{hidden} = !$layer->{hidden};
+	  $self->update;
+	  $self->{overlay}->render;
+	  last SWITCH;
+      }
+      if (/Properties/) {
+	  my $ret;
+	  if (ref($layer) eq 'Geo::Vector') {
+	      $ret = $self->{ogr_dialog}->layer_properties($self->{overlay},$layer);
+	  } elsif (ref($layer) eq 'Geo::Raster' and not $layer->{GDAL}) {
+	      $ret = $self->{gdal_dialog}->layer_properties($self->{overlay},$layer);
+	      if ($ret->{nodata} and $ret->{nodata} =~ /^(\d|\.)/) {
+		  $layer->nodata_value($ret->{nodata});
+	      }
+	  } elsif (ref($layer) eq 'Geo::Raster' and $layer->{GDAL}) {
+	      $ret = $self->{gdal_dialog}->layer_properties2($self->{overlay},$layer);
+	  }
+	  $layer->{alpha} = $ret->{alpha} if defined $ret->{alpha};
+	  $layer->{name} = $ret->{name} if defined $ret->{name};
+	  $self->update();
+	  $self->{overlay}->render if defined $ret->{alpha};
+	  last SWITCH; 
+      }
+      if (/Features/) {
+	  last SWITCH unless $layer;
+	  last SWITCH unless ref($layer) eq 'Geo::Vector';
+	  $self->{ogr_dialog}->browse_features($layer->{ogr_layer},$self->{overlay});
+	  last SWITCH;
+      }
+      if (/Vertices/) {
+	  last SWITCH unless $layer;
+	  last SWITCH unless ref($layer) eq 'Geo::Vector';
+	  $self->{ogr_dialog}->browse_vertices($layer->{ogr_layer},$self->{overlay});
+	  last SWITCH; 
+      }
+      if (/Rasterize/) {
+	  my $ret = $self->{ogr_dialog}->rasterize_dialog($layer,$self->{overlay});
+	  if ($ret->{like}) {
+	      my $g = $layer->rasterize(%$ret);
+	      if ($g) {
+		  $self->add_layer($g, 'r', 1);
+		  $self->{overlay}->render;
+	      }
+	  }
+	  last SWITCH;
+      }
+      if (/Colors/) {
+	  if (ref($layer) eq 'Geo::Vector') {
+	      $self->{ogr_dialog}->colors_dialog($layer,$self->{overlay});
+	  } elsif (ref($layer) eq 'Geo::Raster') {
+	      $self->{gdal_dialog}->colors_dialog($layer,$self->{overlay});
+	  }
+	  last SWITCH; 
+      }
+      if (/Color/) {
+	  if (ref($layer) eq 'Geo::Vector') {
+	      $self->{ogr_dialog}->color_dialog($layer,$self->{overlay});
+	  }
+	  last SWITCH; 
+      }
+      if (/Clip/) {
+	  last SWITCH unless $layer and ref($layer) eq 'Geo::Raster' and $layer->{GDAL};
+	  my @dim = $self->{gdal_dialog}->clip_dialog($layer,$self->{overlay});
+	  if (@dim) {
+	      my $name = shift @dim;
+	      my $g = $layer->cache(@dim);
+	      $self->add_layer($g, $name, 1);
+	      $self->{overlay}->render;
+	  }
+      }
+      if (/Inspect/) {
+	  $self->inspect($layer);
+	  last SWITCH; 
+      }
+      if (/Remove/) {
+	  $self->delete_selected(); 
+	  last SWITCH; 
+      }
+  }
+    
 }
 
 =pod
@@ -155,65 +321,49 @@ sub toolbar {
     my($self) = @_;
 
     my $toolbar = Gtk2::Toolbar->new ();
+    
+    my %tips = ('Open raster layer' => 'Add a new raster layer.',
+		'Open vector layer' => 'Add a new vector layer.',
+		'Zoom to all' => 'Zoom to all layers.',
+		'Select' => 'Set select mode.',
+		'Edit' => 'Show the vertices or the objects.',
+		'Move' => 'Set the move mode (move selected vertices).',
+		'Shell' => 'Go back to Perl shell in the terminal.'
+		);
 
-    for (reverse('Add','Remove','Up','Down','Toggle',
-		 '+','-','Pan','Zoom','Zoom to','Zoom to all',
-		 'Select','Edit','Move','Shell')) {
+    for (reverse('Open raster layer',
+		 'Open vector layer',
+		 'Zoom to all',
+#		 'Select',
+#		 'Edit',
+#		 'Move',
+#		 'Shell'
+		 )) {
 
 	my $b = Gtk2::ToolButton->new(undef,$_);
+
+	my $tooltips = Gtk2::Tooltips->new;
+	$b->set_tooltip($tooltips,$tips{$_},'');
+	$tooltips->set_tip($b,$tips{$_});
+	$tooltips->enable;
+
 	$toolbar->insert($b,0);
 	my $sub;
       SWITCH: {
-	  if (/^Add/) { $sub = 
-			    sub { 
-				$self->add();
-				$self->{tree_view}->set_cursor(Gtk2::TreePath->new(0));
-				my ($selected,$selected_name) = $self->selected_layer();
-				$self->{overlay}->zoom_to($selected);
-			    }; last SWITCH; }
-	  if (/^Remove/) { $sub = 
-			       sub {
-				   $self->delete_selected(); 
-			       }; last SWITCH; }
-	  if (/^Up/) { $sub = 
-			   sub { 
-			       $self->move_up(); 
-			   }; last SWITCH; }
-	  if (/^Down/) { $sub = 
-			     sub { 
-				 $self->move_down(); 
-			     }; last SWITCH; }
-	  if (/^Toggle/) { $sub = 
-			     sub { 
-				 $self->toggle(); 
-			     }; last SWITCH; }
-	  if (/^\+/) { $sub = 
-			   sub { 
-			       $self->{overlay}->zoom_in(); 
-			   }; last SWITCH; }
-	  if (/^\-/) { $sub = 
-			   sub { 
-			       $self->{overlay}->zoom_out(); 
-			   }; last SWITCH; }
+	  if (/raster/) { $sub = 
+			      sub { 
+				  return unless $self->add_raster();
+				  $self->{tree_view}->set_cursor(Gtk2::TreePath->new(0));
+			      }; last SWITCH; }
+	  if (/vector/) { $sub = 
+			      sub { 
+				  return unless $self->add_vector();
+				  $self->{tree_view}->set_cursor(Gtk2::TreePath->new(0));
+			      }; last SWITCH; }
 	  if (/^Zoom to all/) { $sub = 
 				    sub { 
 					$self->{overlay}->zoom_to_all(); 
 				    }; last SWITCH; }
-	  if (/^Zoom to/) { $sub = 
-				sub { 
-				    my ($selected,$selected_name) = $self->selected_layer();
-				    $self->{overlay}->zoom_to($selected);
-				}; last SWITCH; }
-	  if (/^Zoom/) { $sub = 
-			     sub { 
-				 $self->{overlay}->{rubberbanding} = 'zoom rect';
-				 $self->{overlay}->event_handler();
-			       }; last SWITCH; }
-	  if (/^Pan/) { $sub = 
-			    sub { 
-				$self->{overlay}->{rubberbanding} = 'pan line';
-				$self->{overlay}->event_handler();
-			    }; last SWITCH; }
 	  if (/^Select/) { $sub = 
 			       sub { 
 				   $self->{overlay}->{rubberbanding} = 'select rect';
@@ -221,9 +371,10 @@ sub toolbar {
 			       }; last SWITCH; }
 	  if (/^Edit/) { $sub = 
 			     sub { 
-				 my ($selected,$selected_name) = $self->selected_layer();
-				 if (ref($selected) eq 'Geo::Shapelib') {
-				     $selected->{ShowPoints} = $selected->{ShowPoints} ? 0 : 1;
+				 my $layer = $self->get_selected_layer();
+				 if (ref($layer) eq 'Geo::Shapelib' or 
+				     ref($layer) eq 'Geo::Vector') {
+				     $layer->{ShowPoints} = $layer->{ShowPoints} ? 0 : 1;
 				     $self->{overlay}->render();
 				     $self->{overlay}->event_handler();
 				 }
@@ -233,6 +384,7 @@ sub toolbar {
 				 $self->{overlay}->{rubberbanding} = 'move line';
 				 $self->{overlay}->event_handler();
 			     }; last SWITCH; }
+	  
 	  if (/^Shell/) { $sub = 
 			      sub { 
 				  $self->shell();
@@ -243,18 +395,45 @@ sub toolbar {
     return $toolbar;
 }
 
+sub inspect {
+    my ($self,$data,$name) = @_;
+
+    my $dialog = $self->{glade}->get_widget('dialog1');
+    $name = $data->{name} if ref($data) and ref($data) =~ /^Geo/;
+    $name = '' unless $name;
+    $dialog->set_title($name);
+
+    $data = \$data unless ref $data;
+
+    my $treedumper = Data::TreeDumper::Renderer::GTK->new
+	(data => $data,
+	 title => $name,
+	 dumper_setup => {});
+
+    $treedumper->modify_font(Gtk2::Pango::FontDescription->from_string ('monospace'));
+    $treedumper->collapse_all;
+
+    my $scroller = $self->{glade}->get_widget('scrolledwindow2');
+    $scroller->remove($self->{treedumper}) if $self->{treedumper};
+
+    $self->{treedumper} = $treedumper;
+    $scroller->add($treedumper);
+
+    $dialog->move(@{$self->{dialog1_position}}) if $self->{dialog1_position}; # for WinAxe
+    $dialog->show_all;
+}
+
 =pod
 
-=head2 add
+=head2 add_raster
 
 calls Gtk2::FileChooserDialog and if a file of known type is selected,
 opens it and adds it by calling add_layer
 
 =cut
 
-sub add {
+sub add_raster {
     my($self) = @_;
-    my $filename;
 
     my $file_chooser =
 	Gtk2::FileChooserDialog->new ('Select a spatial data file',
@@ -262,43 +441,89 @@ sub add {
 				      'gtk-cancel' => 'cancel',
 				      'gtk-ok' => 'ok');
 
+    $file_chooser->set_select_multiple(1);
+
     my $folder = $file_chooser->get_current_folder;
 
     $file_chooser->set_current_folder($self->{add_from_folder}) if $self->{add_from_folder};
+
+    my $filename;
+    my @filenames;
     
     if ('ok' eq $file_chooser->run) {
 	# you can get the user's selection as a filename or a uri.
 	$self->{add_from_folder} = $file_chooser->get_current_folder;
-	$filename = $file_chooser->get_filename;
+#	$filename = $file_chooser->get_filename;
+	@filenames = $file_chooser->get_filenames;
     }
 
     $file_chooser->set_current_folder($folder);
     
     $file_chooser->destroy;
 
-    return unless $filename;
+#    return unless $filename;
+    return unless @filenames;
 
-    my ($ext) = $filename =~ /\.(\w+)$/;
-    my @f = split /\//,$filename;
-    my $name = pop @f;
-    $name =~ s/\.\w+$//;
+    for $filename (@filenames) {
+	my $layer;
 
-    my %grid = (asc=>1,bil=>1,dem=>1,hdr=>1);
-    my %shape = (shp=>1,SHP=>1);
-
-    if ($grid{lc($ext)}) {
-	my $grid = new Geo::Raster $filename;
-	return unless $grid;
-	$self->add_layer($grid, $name);
-    } elsif ($shape{$ext}) {
-#	my $shapefile = new Geo::Shapelib $filename, {Rtree=>1};
-	my $shapefile = new Geo::Shapelib $filename;
-	return unless $shapefile;
-	$shapefile->{ALPHA} = 1;
-	$self->add_layer($shapefile, $name);
-    } else {
-	croak("unrecognized format: $ext");
+	eval {
+	    $layer = new Geo::Raster $filename;
+	};
+	if ($@) {
+	    my $err = "Not a raster: ".$@;
+	    if ($@) {
+		$err =~ s/\n/ /g;
+		$err =~ s/\s+$//;
+		$err =~ s/\s+/ /g;
+		$err =~ s/^\s+$//;		
+		croak("$filename is not recognized by GDAL: $err");
+		next;
+	    }
+	}
+	
+	my $name = fileparse($filename);
+	$name =~ s/\.\w+$//;
+	$self->add_layer($layer, $name, 1);
+	$self->{overlay}->render;
     }
+    
+    return 1;
+}
+
+sub add_vector {
+    my($self) = @_;
+
+    my $folder = $self->{add_from_folder};
+
+    my ($datasource,$layer_name,$sql) = $self->{ogr_dialog}->ogr_open($self);
+
+    return unless $layer_name;
+    
+    $self->{add_from_folder} = $self->{ogr_dialog}->get_current_folder();
+
+    my $layer;
+
+    eval {
+	$layer = new Geo::Vector datasource=>$datasource,layer=>$layer_name,sql=>$sql;
+    };
+    if ($@) {
+	if ($err) {
+	    $err =~ s/\n/ /g;
+	    $err =~ s/\s+$//;
+	    $err =~ s/\s+/ /g;
+	    $err =~ s/^\s+$//;
+	} else {
+	    $err = 'unspecified error';
+	}
+	croak("Could not open a layer: $err");
+	return;
+    }
+
+    $self->add_layer($layer, $layer_name, 1);
+    $self->{overlay}->render;
+
+    return 1;
 }
 
 =pod
@@ -489,12 +714,6 @@ sub plot {
     if ($#datasets == 0) {
 	gnuplot("plot $xrange$yrange $what[0] $using[0] title \"$title[0]\" with $with[0]" . $other);
     } else {
-#	unless (@names) {
-#	    @names = $_input =~ /\$[a-zA-Z]\w*/g;
-#	    unless (@names) {
-#		@names = (0..$#datasets);
-#	    }
-#	}
 	$title[0] = '' unless $title[0];
 	my $plot = "plot $xrange$yrange $what[0] $index[0] $using[0] title \"$title[0]\" with $with[0]";
 	for my $set (1..$#datasets) {
@@ -531,7 +750,7 @@ todo: same for vector layers
 
 sub clip_selected {
     my($self) = @_;
-    my($gd) = $self->selected_layer();
+    my $gd = $self->selected_layer();
     return unless $gd;
     return unless ref($gd) eq 'Geo::Raster';
     my @va = $self->{overlay}->visible_area;
@@ -539,32 +758,37 @@ sub clip_selected {
     return $gd->clip(@va);
 }
 
-=pod
-
-=head2 set_iter($iter,$layer,$name)
-
-calls {model}->set for the given $iter use $name and data from $layer
-
-probably private
-
-=cut
-
-sub set_iter {
-    my($self,$iter,$layer,$name) = @_;
+sub set_layer {
+    my($self,$layer) = @_;
     my($type,$colors,$visible,$alpha);
+
+    $type = '';
+    $alpha = defined $layer->{alpha} ? $layer->{alpha} : 255;
+
     if (ref($layer) eq 'Geo::Raster') {
-	$type = $layer->{DATATYPE} == $Geo::Raster::INTEGER_GRID ? 'int' : 'real';
-#	$colors = $layer->{COLOR_TABLE_SIZE};
-	$alpha = defined $layer->{ALPHA} ? (ref($layer->{ALPHA}) ? 'Layer' : $layer->{ALPHA}) : '1';
-    } elsif (ref($layer) eq 'Geo::Shapelib') {
-	$type = 'shape';
-#	$colors = 'tbd';
-	$alpha = defined $layer->{ALPHA} ? $layer->{ALPHA} : '1';
+
+	$type = $layer->{DATATYPE} == $Geo::Raster::INTEGER_GRID ? 'int' : 'real'
+	    if defined $layer->{DATATYPE};
+
+	$alpha = 'Layer' if ref($alpha);
+
+    } elsif (ref($layer) eq 'Gtk2::Ex::Geo::Composite') {
+
+	$type = $layer->{type};
+	
+    } elsif (ref($layer) eq 'Geo::Vector') {
+
+	$type = 'ogr';
+
+    } else {
+	croak "unknown layer type ref($layer)";
     }
-    $visible = $layer->{HIDE} ? ' ' : 'X';
-    $self->{model}->set ($iter,
-			 0, "$name",
-			 1, "$type",
+
+    $visible = $layer->{hidden} ? ' ' : 'X';
+
+    $self->{model}->set ($layer->{iterator},
+			 0, $layer->{name},
+			 1, $type,
 			 2, $visible,
 			 3, $alpha,
 			 );
@@ -572,7 +796,7 @@ sub set_iter {
 
 =pod
 
-=head2 add_layermy($layer,$name,$do_not_zoom_to);
+=head2 add_layer($layer,$name,$do_not_zoom_to);
 
 adds $layer with $name to overlay and model
 
@@ -583,30 +807,14 @@ the default behavior is to zoom to the new layer
 sub add_layer {
     my($self,$layer,$name,$do_not_zoom_to) = @_;
     return unless $layer;
-    return unless ref($layer) =~ /^Geo::/;
+    return unless ref($layer) =~ /Geo::/;
+
+    $layer->{alpha} = 255;
+    $layer->{iterator} = $self->{model}->insert (undef, 0);
+    $layer->{name} = $name;
+
+    $self->set_layer($layer);
     $self->{overlay}->add_layer($layer,$do_not_zoom_to);
-    my $iter = $self->{model}->insert (undef, 0);
-    $self->set_iter($iter,$layer,$name);
-    push @{$self->{list}},$iter;
-    push @{$self->{names}},$name;
-    $self->{layers}->{$name} = $layer;
-}
-
-=pod
-
-=head2 get($name)
-
-returns a layer by its name
-
-=cut
-
-sub get {
-    my($self,$name) = @_;
-    for my $index (0..$#{$self->{list}}) {
-	if ($name eq $self->{names}->[$index]) {
-	    return $self->{overlay}->{layers}->[$index];
-	}
-    }
 }
 
 =pod
@@ -621,7 +829,7 @@ todo: same for vector layers
 
 sub get_focal {
     my($self,$name) = @_;
-    my $gd = $self->get($name);
+    my $gd = $self->{overlay}->get_layer_by_name($name);
     if ($gd and ref($gd) eq 'Geo::Raster') {
 	my @va = $self->{overlay}->visible_area; # ul, dr
 	@va = $gd->wa2ga(@va);
@@ -634,30 +842,16 @@ sub get_focal {
 
 =pod
 
-=head2 update($index_or_name)
+=head2 update
 
-$index_or_name is optional
-
-updates the tree_view (by calling set_iter) for the given layer
+updates the tree_view
 
 =cut
 
 sub update {
-    my($self,$index_or_name) = @_;
-    if (!defined $index_or_name) {
-	for my $index (0..$#{$self->{list}}) {
-	    $self->update($index);
-	}
-    } elsif ($index_or_name =~ /^\d+$/) {
-	$self->set_iter($self->{list}->[$index_or_name],
-			$self->{overlay}->{layers}->[$index_or_name],
-			$self->{names}->[$index_or_name]);
-    } else {
-	for my $index (0..$#{$self->{list}}) {
-	    if ($index_or_name eq $self->{names}->[$index]) {
-		$self->update($index);
-	    }
-	}
+    my($self) = @_;
+    for my $layer (@{$self->{overlay}->{layers}}) {
+	$self->set_layer($layer);
     }
 }
 
@@ -684,12 +878,10 @@ sub move_down {
     my ($path, $focus_column) = $self->{tree_view}->get_cursor;
     return unless $path;
     my $index = $path->to_string;
-    my $n = $#{$self->{list}};
+    my $n = $#{$self->{overlay}->{layers}};
     if ($index < $n) {
-	swap($self->{overlay}->{layers},$n-$index,$n-$index-1);
-	my($iter1,$iter2) = swap($self->{list},$n-$index,$n-$index-1);
-	swap($self->{names},$n-$index,$n-$index-1);
-	$self->{model}->move_after($iter1,$iter2);
+	my($layer1,$layer2) = swap($self->{overlay}->{layers},$n-$index,$n-$index-1);
+	$self->{model}->move_after($layer1->{iterator},$layer2->{iterator});
 	$self->{overlay}->render;
     }
 
@@ -709,12 +901,10 @@ sub move_up {
     my ($path, $focus_column) = $self->{tree_view}->get_cursor;
     return unless $path;
     my $index = $path->to_string;
-    my $n = $#{$self->{list}};
-    if ($index > 0) {	
-	swap($self->{overlay}->{layers},$n-$index,$n-$index+1);
-	my($iter1,$iter2) = swap($self->{list},$n-$index,$n-$index+1);
-	my ($n1, $n2) = swap($self->{names},$n-$index,$n-$index+1);
-	$self->{model}->move_before($iter1,$iter2);
+    my $n = $#{$self->{overlay}->{layers}};
+    if ($index > 0) {
+	my($layer1,$layer2) = swap($self->{overlay}->{layers},$n-$index,$n-$index+1);
+	$self->{model}->move_before($layer1->{iterator},$layer2->{iterator});
 	$self->{overlay}->render;
     }
 
@@ -733,13 +923,10 @@ sub delete_selected {
     my ($path, $focus_column) = $self->{tree_view}->get_cursor;
     return unless $path;
     my $index = $path->to_string;
-    my $n = $#{$self->{list}};
+    my $n = $#{$self->{overlay}->{layers}};
     if ($index >= 0 and $index <= $n) {
-	splice(@{$self->{overlay}->{layers}},$n-$index,1);
-	my $iter = $self->{list}->[$n-$index];
-	splice(@{$self->{list}},$n-$index,1);
-	splice(@{$self->{names}},$n-$index,1);
-	$self->{model}->remove($iter);
+	my($layer) = splice(@{$self->{overlay}->{layers}},$n-$index,1);
+	$self->{model}->remove($layer->{iterator});
 	if ($n > 0) {
 	    $index-- if $index == $n;
 	    $self->{tree_view}->set_cursor(Gtk2::TreePath->new($index));
@@ -750,90 +937,58 @@ sub delete_selected {
 
 =pod
 
-=head2 selected_layer
+=head2 get_selected_layer
 
 returns the selected layer
 
 =cut
 
-sub selected_layer {
+sub get_selected_layer {
     my($self) = @_;
     my ($path, $focus_column) = $self->{tree_view}->get_cursor;
     return unless $path;
     my $index = $path->to_string;
-    my $n = $#{$self->{list}};
-    if ($index >= 0 and $index <= $n) {
-	return ($self->{overlay}->{layers}->[$n-$index],$self->{names}->[$n-$index]);
-    } 
-    return undef;
+    return $self->{overlay}->get_layer_by_index($index);
 }
 
 =pod
 
-=head2 top_layer
-
-returns the top layer
+=head2 event_handler
 
 =cut
-
-sub top_layer {
-    my($self) = @_;
-    return ($self->{overlay}->{layers}->[$#{$self->{list}}],$self->{names}->[$#{$self->{list}}]);
-}
-
-=pod
-
-=head2 toggle
-
-hides/shows the selected layer
-
-=cut
-
-sub toggle {
-    my($self) = @_;
-    my ($path, $focus_column) = $self->{tree_view}->get_cursor;
-    return unless $path;
-    my $index = $path->to_string;
-    my $n = $#{$self->{list}};
-    if ($index >= 0 and $index <= $n) {
-	$self->{overlay}->{layers}->[$n-$index]->{HIDE} = !$self->{overlay}->{layers}->[$n-$index]->{HIDE};
-	$self->update($n-$index);
-	$self->{overlay}->render;
-    }
-}
 
 sub event_handler {
-    my ($self,$event,@xy) = @_;
+    my ($self,$event,@points) = @_;
 
     # select & move vertices is handled here
 
     if ($self->{overlay}->{selection}) {
 
-	my ($selected,$selected_name) = $self->selected_layer();
+	my $layer = $self->get_selected_layer();
 
-	if (ref($selected) eq 'Geo::Shapelib') {
+	if (ref($layer) eq 'Geo::Shapelib') {
 
-	    if ($self->{overlay}->{rubberbanding} =~ /select/ and $selected->{Rtree}) {
+	    if ($self->{overlay}->{rubberbanding} =~ /select/ and $layer->{Rtree}) {
 
 		my @selection = @{$self->{overlay}->{selection}};
 
 		my @shapes;
 
-		$selected->{Rtree}->query_completely_within_rect(@selection,\@shapes);
+		$layer->{Rtree}->query_completely_within_rect(@selection,\@shapes);
 		print "you selected shapes: @shapes\n";
 
 		@shapes = ();
-		$selected->{Rtree}->query_partly_within_rect(@selection,\@shapes);
+		$layer->{Rtree}->query_partly_within_rect(@selection,\@shapes);
 		print "shapes: @shapes overlap with the selection\n";
 		
 		# undo all
 
-		$selected->clear_selections();
+		$layer->clear_selections();
 		
 		# here find the vertices in the selection
 
 		for my $shape (@shapes) {
-		    my $vertices = $selected->select_vertices($shape,@selection);
+		    my $vertices = $layer->select_vertices($shape,@selection);
 		    my $n = @$vertices;
 		    print "you selected $n vertices from shape $shape\n";
 		}
@@ -842,7 +997,7 @@ sub event_handler {
 
 		my($fromx,$fromy,$dx,$dy) = @{$self->{overlay}->{selection}};
 
-		$selected->move_selected_vertices($dx,$dy);
+		$layer->move_selected_vertices($dx,$dy);
 
 	    }
 
@@ -853,7 +1008,7 @@ sub event_handler {
     }
 
     return unless $self->{event_handler};
-    $self->{event_handler}->($self->{event_handler_user_param},$event,@xy);
+    $self->{event_handler}->($self->{event_handler_user_param},$event,@points);
 }
 
 sub draw_on {
@@ -885,51 +1040,53 @@ text-based terminal with a plain Perl eval loop
 sub eval_entry {
     my($entry,$event,$self) = @_;
     my $key = $event->keyval;
-    if ($key == 65293) {
-	my $text = $entry->get_text;
-	push @{$self->{history}}, $text if $text ne '';
-	$self->{history_index} = @{$self->{history}};
+    
+    my $text = $entry->get_text;
+    $self->{history}->[$self->{history_index}] = $text;
+
+    if ($text ne '' and $key == 65293) {
+
+	push @{$self->{history}}, '' unless $self->{history}->[$#{$self->{history}}] eq '';
+	$self->{history_index} = $#{$self->{history}};
 	$entry->set_text('');
+
 	my $focal = 0; # default is global
 	if ($text =~ /^focal:\s*/) {
 	    $text =~ s/^focal:\s*//;
 	    $focal = 1;
 	}
 	my @g = $text =~ /\$(\w+)/g;
-	my @gd;
+	my @_gd;
 	for my $i (0..$#g) {
-	    $gd[$i] = $focal ? $self->get_focal($g[$i]) : $self->get($g[$i]);
-	    next unless $gd[$i];
-	    $text =~ s/\$$g[$i]\b/\$gd[$i]/;
+	    $_gd[$i] = $focal ? $self->get_focal($g[$i]) : $self->{overlay}->get_layer_by_name($g[$i]);
+	    next unless $_gd[$i];
+	    $text =~ s/\$$g[$i]\b/\$_gd[$i]/;
 	}
 	{
 	    no strict; # this does not do the trick and no strict 'refs' is not enough!!
 #	    no warnings;
 	    eval $text;
-	    print STDERR "$text\n$@" if $@;
+	    croak "$text\n$@" if $@;
 	}
 	for my $i (0..$#g) {
-	    if ($self->get($g[$i])) {
-		$gd[$i]->getminmax() if ref($gd[$i]) =~ /^Geo::Raster/;
+	    if ($self->{overlay}->get_layer_by_name($g[$i])) {
+		$_gd[$i]->getminmax() if ref($_gd[$i]) =~ /^Geo::Raster/;
 	    } else {
-		eval "\$self->add_layer(\$$g[$i],'$g[$i]',1) if ref(\$$g[$i]) =~ /^Geo::/;";
+		eval "\$self->add_layer(\$$g[$i],'$g[$i]',1) if ref(\$$g[$i]) =~ /Geo::/;"
+		    if $g[$i] and $g[$i] ne 'self';
 	    }
 	}
+	undef @_gd;
 	$self->update();
 	$self->{overlay}->render;
 	return 1;
     } elsif ($key == 65362) { # arrow up, history?
 	$self->{history_index} = max(0, $self->{history_index}-1);
-	$entry->set_text($self->{history}->[$self->{history_index}]) if 
-	    $self->{history_index} >=0 and $self->{history}->[$self->{history_index}];
+	$entry->set_text($self->{history}->[$self->{history_index}]);
 	return 1;
     } elsif ($key == 65364) {
-	$self->{history_index} = min($#{$self->{history}}+1, $self->{history_index}+1);
-	if ($self->{history_index} <= $#{$self->{history}}) {
-	    $entry->set_text($self->{history}->[$self->{history_index}]);
-	} else {
-	    $entry->set_text('');
-	}
+	$self->{history_index} = min($#{$self->{history}}, $self->{history_index}+1);
+	$entry->set_text($self->{history}->[$self->{history_index}]);
 	return 1;
     }
 }
@@ -943,7 +1100,7 @@ sub max {
 }
 
 sub shell {
-    my($self,$iter,$layer,$name) = @_;
+    my($self) = @_;
     my $term = new Term::ReadLine '';
     my $hfile = "$ENV{HOME}/.rash_history";
     $term->ReadHistory($hfile);
@@ -983,5 +1140,102 @@ sub output {
     }
 }
 
+=pod
+
+=head1 SEE ALSO
+
+Gtk2::Ex::Geo
+
+=head1 AUTHOR
+
+Ari Jolma, E<lt>ajolma at tkk.fiE<gt>
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2006 by Ari Jolma
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.5 or,
+at your option, any later version of Perl 5 you may have available.
+
+=cut
+
 1;
-__END__
+__DATA__
+<?xml version="1.0" standalone="no"?> <!--*- mode: xml -*-->
+<!DOCTYPE glade-interface SYSTEM "http://glade.gnome.org/glade-2.0.dtd">
+
+<glade-interface>
+
+<widget class="GtkDialog" id="dialog1">
+  <property name="width_request">250</property>
+  <property name="height_request">400</property>
+  <property name="title" translatable="yes">dialog1</property>
+  <property name="type">GTK_WINDOW_TOPLEVEL</property>
+  <property name="window_position">GTK_WIN_POS_NONE</property>
+  <property name="modal">False</property>
+  <property name="resizable">True</property>
+  <property name="destroy_with_parent">False</property>
+  <property name="decorated">True</property>
+  <property name="skip_taskbar_hint">False</property>
+  <property name="skip_pager_hint">False</property>
+  <property name="type_hint">GDK_WINDOW_TYPE_HINT_DIALOG</property>
+  <property name="gravity">GDK_GRAVITY_NORTH_WEST</property>
+  <property name="has_separator">True</property>
+
+  <child internal-child="vbox">
+    <widget class="GtkVBox" id="dialog-vbox4">
+      <property name="visible">True</property>
+      <property name="homogeneous">False</property>
+      <property name="spacing">0</property>
+
+      <child internal-child="action_area">
+	<widget class="GtkHButtonBox" id="dialog-action_area4">
+	  <property name="visible">True</property>
+	  <property name="layout_style">GTK_BUTTONBOX_END</property>
+
+	  <child>
+	    <widget class="GtkButton" id="closebutton1">
+	      <property name="visible">True</property>
+	      <property name="can_default">True</property>
+	      <property name="can_focus">True</property>
+	      <property name="label">gtk-close</property>
+	      <property name="use_stock">True</property>
+	      <property name="relief">GTK_RELIEF_NORMAL</property>
+	      <property name="focus_on_click">True</property>
+	      <property name="response_id">-7</property>
+	    </widget>
+	  </child>
+	</widget>
+	<packing>
+	  <property name="padding">0</property>
+	  <property name="expand">False</property>
+	  <property name="fill">True</property>
+	  <property name="pack_type">GTK_PACK_END</property>
+	</packing>
+      </child>
+
+      <child>
+	<widget class="GtkScrolledWindow" id="scrolledwindow2">
+	  <property name="visible">True</property>
+	  <property name="can_focus">True</property>
+	  <property name="hscrollbar_policy">GTK_POLICY_ALWAYS</property>
+	  <property name="vscrollbar_policy">GTK_POLICY_ALWAYS</property>
+	  <property name="shadow_type">GTK_SHADOW_NONE</property>
+	  <property name="window_placement">GTK_CORNER_TOP_LEFT</property>
+
+	  <child>
+	    <placeholder/>
+	  </child>
+	</widget>
+	<packing>
+	  <property name="padding">0</property>
+	  <property name="expand">True</property>
+	  <property name="fill">True</property>
+	</packing>
+      </child>
+    </widget>
+  </child>
+</widget>
+
+</glade-interface>
