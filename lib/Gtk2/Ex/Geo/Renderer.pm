@@ -1,16 +1,16 @@
+## @class Gtk2::Ex::Geo::Renderer
+# @brief Creates a cairo surface and gdk pixbuf. Calls the render method of all layers.
 package Gtk2::Ex::Geo::Renderer;
 
 use strict;
 use warnings;
 use Carp;
-use Gtk2;
 
 BEGIN {
     use Exporter "import";
     our @EXPORT = qw();
     our @EXPORT_OK = qw();
     our %EXPORT_TAGS = ( FIELDS => [ @EXPORT_OK, @EXPORT ] );
-    our $VERSION = '0.43';
 }
 
 require DynaLoader;
@@ -46,8 +46,7 @@ Gtk2::Ex::Geo::Renderer - A Gtk2::Gdk::Pixbuf made from spatial data
 
 =item $layers
 
-a ref to a list of spatial data layers, currently supported are
-Geo::Raster, Geo::Vector, and Gtk2::Ex::Geo::Composite
+a referen to a list of visual geospatial data layers
 
 =item $minX, $maxY
 
@@ -80,32 +79,35 @@ created with Geo::Raster::ral_pixbuf_new.
 =cut
 
 sub new {
-    my($class,$layers,$minX,$maxY,
-       $pixel_size,$width,$height,
-       $w_offset,$h_offset,$bg_r,$bg_g,$bg_b) = @_;
-    
-    my $pb = &Geo::Raster::ral_pixbuf_new($width, $height,
-					  $minX+$pixel_size*$w_offset, 
-					  $maxY-$pixel_size*$h_offset, 
-					  $pixel_size, 
-					  $bg_r, $bg_g, $bg_b, 255);
-    
-    for my $lyr (@$layers) {
+    my($class, $layers, 
+       $minX, $maxY, $pixel_size, $w_offset, $h_offset,
+       $width, $height,
+       $bg_r, $bg_g, $bg_b, $overlay) = @_;
 
-	next if $lyr->{hidden};
-	my $alpha = $lyr->{alpha};
-	$alpha = -1 unless defined($alpha);
-	next if !ref($alpha) and $alpha == 0;
-	$lyr->render($pb, $alpha);
+    return unless defined $minX;
 
+    my @viewport = ($minX+$pixel_size*$w_offset, 0, 0, $maxY-$pixel_size*$h_offset);
+    $viewport[2] = $viewport[0]+$pixel_size*$width;
+    $viewport[1] = $viewport[3]-$pixel_size*$height;
+    
+    my $pb = &Geo::Raster::ral_pixbuf_create($width, $height,
+					     $viewport[0], $viewport[3],
+					     $pixel_size, 
+					     $bg_r, $bg_g, $bg_b, 255);
+
+    my $surface = cairo_surface_from_pb($pb);
+    my $cr = Cairo::Context->create($surface);
+
+    for my $layer (@$layers) {
+	$layer->render($pb, $cr, $overlay, \@viewport);
     }
 
-    my $wd = &Geo::Raster::ral_pixbuf_get_world($pb);
-#    print STDERR "@$wd\n";
-
+    undef $cr;
+    undef $surface;
+    
     my $self = gdk_pixbuf_new_from_data($pb);
 
-    &Geo::Raster::ral_pixbuf_delete($pb); # does not delete the real pixbuf
+    &Geo::Raster::ral_pixbuf_destroy($pb); # does not delete the real pixbuf
 
     bless($self, $class); 
 }

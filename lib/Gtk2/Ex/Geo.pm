@@ -1,12 +1,38 @@
+## @class Gtk2::Ex::Geo
+# @brief The module to 'use' in applications 
 package Gtk2::Ex::Geo;
 
 use 5.005000;
 use strict;
 use warnings;
-use Gtk2::Ex::Geo::Composite;
+use POSIX;
+POSIX::setlocale( &POSIX::LC_NUMERIC, "C" ); # http://www.remotesensing.org/gdal/faq.html nr. 11
+
+use Glib qw/TRUE FALSE/;
+use Gtk2::Gdk::Keysyms;
+
+# known layer types:
+use Geo::Layer qw/:all/;
+
+# these will become optional
+use Geo::Raster;
+use Geo::Vector;
+
+use Gtk2::GladeXML;
+use Gtk2::Ex::Geo::DialogMaster;
+
 use Gtk2::Ex::Geo::Renderer;
 use Gtk2::Ex::Geo::Overlay;
 use Gtk2::Ex::Geo::Glue;
+
+use Gtk2::Ex::Geo::GDALDialog;
+use Gtk2::Ex::Geo::OGRDialog;
+
+use Gtk2::Ex::Geo::Layer;
+
+# these will become optional
+use Gtk2::Ex::Geo::Raster;
+use Gtk2::Ex::Geo::Vector;
 
 require Exporter;
 
@@ -22,7 +48,7 @@ our @EXPORT = qw(
 	
 );
 
-our $VERSION = '0.43';
+our $VERSION = '0.51';
 
 1;
 __END__
@@ -30,6 +56,41 @@ __END__
 =head1 NAME
 
 Gtk2::Ex::Geo - Perl Gtk2 widgets for GIS
+
+=head1 SYNOPSIS
+
+# the order of these is important:
+use Gtk2::Ex::Geo;
+use Glib qw/TRUE FALSE/;
+use Gtk2 '-init';
+
+my $gis = Gtk2::Ex::Geo::Glue->new( history=>[''] );
+
+$gis->set_event_handler( \&info );
+$gis->{overlay}->{rubberbanding} = 'zoom rect';
+
+# the widgets already created and in $gis 
+# have to be declared as Custom widgets
+# they are installed through this custom_handler
+
+sub get_custom_widget {
+    my $name = $_[2];
+    if ($name eq 'layer_widget') {
+	return $gis->{tree_view};
+    } elsif ($name eq 'map_widget') {
+	return $gis->{overlay};
+    }
+}
+
+Gtk2::Glade->set_custom_handler(\&get_custom_widget);
+
+$glade = Gtk2::GladeXML->new("gui.glade");
+$glade->signal_autoconnect_from_package('main');
+
+$glade->get_widget('map_widget')->show_all;
+$glade->get_widget('layer_widget')->show;
+
+Gtk2->main;
 
 =head1 LAYERS
 

@@ -13,45 +13,33 @@ BEGIN { use_ok('Gtk2::Ex::Geo') };
 # Insert your test code below, the Test::More module is use()ed here so read
 # its man page ( perldoc Test::More ) for help writing this test script.
 
+# run as "make test GUI=1" to bring up the GUI
+
 use Carp;
 use Glib qw/TRUE FALSE/;
-use Gtk2 '-init';
-use Gtk2::Ex::Geo::Glue;
+use Gtk2;
 
-my $history = "$ENV{HOME}/.rash_history";
-my $resources = "$ENV{HOME}/.rashrc";
+exit unless $ENV{GUI};
 
-my @history = ();
-if (open TMP, $history) {
-    @history = <TMP>;
-    for (@history) {
-	chomp $_;
-	s/\r//;
-    }
-    close TMP;
-}
+Gtk2->init;
 
-my %resources = ();
-if (open TMP, $resources) {
-    my $key = '';
-    while (<TMP>) {
-	chomp $_;
-	s/\r//;
-	if (/^  /) {
-	    s/^  //;
-	    $resources{$key}{$_} = 1;
-	} else {
-	    $key = $_;
-	}
-    }
-    close TMP;
-}
+Glib->install_exception_handler(\&exception_handler);
 
-my $gis = new Gtk2::Ex::Geo::Glue history=>\@history, resources=>\%resources;
+my $home = homedir();
 
 # make the GUI:
 
 my $window = Gtk2::Window->new;
+
+$window->set_title('Geoinformatica');
+my $icon = $0;
+$icon =~ s/Gtk2-Ex-Geo.t/..\/Crop-Circle-5.ico/;
+$window->set_default_icon_from_file($icon) if -f $icon;
+
+my $gis = new Gtk2::Ex::Geo::Glue 
+	history => "$home.rash_history", 
+	resources => "$home.rashrc", 
+	main_window => $window;
 
 my $vbox = Gtk2::VBox->new (FALSE, 0);
 
@@ -65,130 +53,77 @@ $hbox->pack_start ($gis->{overlay}, TRUE, TRUE, 0);
 $vbox->add ($hbox);
 
 $vbox->pack_start ($gis->{entry}, FALSE, FALSE, 0);
-
-my $bar = Gtk2::Statusbar->new ();
-$vbox->pack_start ($bar, FALSE, FALSE, 0);
+$vbox->pack_start ($gis->{statusbar}, FALSE, FALSE, 0);
 
 $window->add ($vbox);
 
-
 # connect callbacks:
 
-$window->signal_connect ("destroy", 
-			 sub {
-			     if (open TMP,">$history") {
-				 for (@history[max(0,$#history-1000)..$#history]) {
-				     print TMP "$_\n";
-				 }
-				 close TMP;
-			     } else {
-				 croak "$!: $history";
-			     }
-			     if (open TMP,">$resources") {				 
-				 for my $key (keys %resources) {
-				     print TMP "$key\n";
-				     for my $value (keys %{$resources{$key}}) {
-					 print TMP "  $value\n";
-				     }
-				 }
-				 close TMP;
-			     } else {
-				 croak "$!: $resources";
-			     }
-			     exit(0); 
-			 });
-
-$gis->set_event_handler(\&info);
-$gis->set_draw_on(\&my_draw);
+$window->signal_connect("destroy", \&close_the_app);
 
 $window->set_default_size(600,600);
 $window->show_all;
 
 $gis->{overlay}->{rubberbanding} = 'zoom rect';
 
-Glib->install_exception_handler(sub {
+Gtk2->main;
 
+# these are the callbacks:
+
+sub exception_handler {
+    
     if ($_[0] =~ /\@INC contains/) {
 	$_[0] =~ s/\(\@INC contains.*?\)//;
     }
     my $dialog = Gtk2::MessageDialog->new(undef,'destroy-with-parent','info','close',$_[0]);
-
-    $dialog->run;
-    $dialog->destroy;
-
-    return 1;
-});
-
-#comment out in test
-Gtk2->main;
-
-
-# these are the callbacks:
-
-sub info {
-    my (undef,$event,$x1,$y1,$x0,$y0) = @_;
-
-    return unless defined $x1;
-
-    my $layer = $gis->get_selected_layer();
-    my $mode = '';
-    ($mode) = $gis->{overlay}->{rubberbanding} =~ /^(\w+)/;
-
-#    print ref($event),"\n";
-
-    if (ref($event) eq 'Gtk2::Gdk::Event::Button') {
-#	print $event->button," ",$event->device,"\n";
-    }
-
-    if (ref($event) eq 'Gtk2::Gdk::Event::Key') {
-#	print $event->keyval,"\n";
-    }
-
-    my $location = sprintf("(x,y) = (%.4f, %.4f)",$x1,$y1);
-    my $value = '';
-    if ($layer and ref($layer) eq 'Geo::Raster') {
-	my @ij = $layer->w2g($x1,$y1);
-	$location .= sprintf(", (i,j) = (%i, %i)",@ij);
-	$value = $layer->wget($x1,$y1);
-	if (defined $value and $value ne 'nodata' and $layer->{INFO}) {
-	    $value = $layer->{TABLE}->{DATA}->[$value]->[$layer->{INFO}-1];
-	}
-    } elsif (ref($layer) eq 'Geo::Shapelib') {
-	if ($layer->{Rtree}) {
-	    my @shapes;	
-	    $layer->{Rtree}->query_point($x1,$y1,\@shapes);
-	    if ($layer->{INFO}) {	
-		my @v;
-		for (@shapes) {
-		    my $ref = $layer->{ShapeRecords}->[$_];
-		    my $v = ref($ref) eq 'ARRAY' ? $ref->[$layer->{INFO}-1] : $ref->{$layer->{INFO}};
-		    push @v,$v;
-		}
-		$value = join(', ',@v);
-	    } else {
-		$value = "shape(s) @shapes";
-	    }
-	}
-    }
-
-    $bar->pop(0);
-    # if mode is move, tell the movement vector
-    $value = '' unless defined $value;
-    my $distance = '';
-    $distance = sqrt(($x1-$x0)**2+($y1-$y0)**2) if defined $x0;
-    $distance = "dist = $distance" if $distance;
-    $bar->push(0, sprintf("$mode $location $value $distance"));
-}
-
-sub my_draw {
-    my(undef,$pixmap) = @_;
+    $dialog->signal_connect(response => \&destroy_dialog);
+    $dialog->show_all;
     
+    return 1;
 }
 
-sub min {
-    $_[0] > $_[1] ? $_[1] : $_[0];
+sub destroy_dialog {
+    my($dialog) = @_;
+    $dialog->destroy;
 }
 
-sub max {
-    $_[0] > $_[1] ? $_[0] : $_[1];
+sub close_the_app {
+    # The order is important! (I think...)
+    for (qw/toolbar entry statusbar/) {
+	$vbox->remove($gis->{$_});
+    }
+    for (qw/tree_view overlay/) {
+	$hbox->remove($gis->{$_});
+    }
+    $gis->close();
+    Gtk2->main_quit;
+    exit(0);
+}
+
+sub homedir {
+
+    require Config;
+    my $OS = $Config::Config{'osname'};
+
+    if ($OS eq 'MSWin32') {
+
+	require Win32::Registry;
+    
+	my $Register = "Volatile Environment";
+	my $hkey = $HKEY_CURRENT_USER; # assignment is just to get rid of a "used only once" warning
+    
+	$HKEY_CURRENT_USER->Open($Register,$hkey);
+    
+	$hkey->GetValues(\%values);
+    
+	$hkey->Close;
+
+	return "$values{HOMEDRIVE}->[2]$values{HOMEPATH}->[2]\\";
+
+    } else {
+
+	return "$ENV{HOME}/";
+
+    }
+
 }

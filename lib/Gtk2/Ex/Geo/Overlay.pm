@@ -1,15 +1,11 @@
+## @class Gtk2::Ex::Geo::Overlay
+# @brief A geocanvas widget
 package Gtk2::Ex::Geo::Overlay;
 
 use strict;
 use POSIX;
 use Carp;
 use Glib qw/TRUE FALSE/;
-use Gtk2::Gdk::Keysyms;
-use Gtk2;
-use Geo::Raster;
-use Gtk2::Ex::Geo::Renderer;
-
-our $VERSION = '0.43';
 
 =pod
 
@@ -33,7 +29,7 @@ public:
 
 bg_color = ($red, $green, $blue) # a color for the background for the overlay
 
-rubberbanding = FALSE, /line/, /rect/, /circle/ 
+rubberbanding = FALSE, /line/, /rect/, /ellipse/ 
 
 private:
 
@@ -57,21 +53,25 @@ my %visual_keys = ($Gtk2::Gdk::Keysyms{plus}=>1,
 use Glib::Object::Subclass
     Gtk2::ScrolledWindow::,
     signals => {
-	# hmm.. empty ... probably I'm not using the signal system correctly...
+	features_selected => {},
+	zoomed_in => {},
+	extent_widened => {},
     },
-    properties => [
-		   Glib::ParamSpec->double (
-					    'zoom_factor', 'Zoom factor', 
-					    'Zoom multiplier when user presses + or -',
-					    0.1, 1000, 1.2, [qw/readable writable/]
-					    ),
-		   Glib::ParamSpec->double (
-					    'step', 'Step', 
-					    'One step when scrolling is window width/height divided by step',
-					    1, 100, 8, [qw/readable writable/]
-					    ),
-
-		   ]
+    properties => 
+    [
+     Glib::ParamSpec->double 
+     (
+      'zoom_factor', 'Zoom factor', 
+      'Zoom multiplier when user presses + or -',
+      0.1, 1000, 1.2, [qw/readable writable/]
+      ),
+     Glib::ParamSpec->double 
+     (
+      'step', 'Step', 
+      'One step when scrolling is window width/height divided by step',
+      1, 100, 8, [qw/readable writable/]
+      ),
+     ]
     ;
 
 sub INIT_INSTANCE {
@@ -79,8 +79,8 @@ sub INIT_INSTANCE {
     my $self = shift;
 
     $self->{image} = Gtk2::Image->new;
-
-    $self->{image}->set_size_request(0,0);
+    $self->{image}->set_size_request(0, 0);
+    $self->{image}->signal_connect(size_allocate => \&size_allocate, $self);
 
     $self->{event_box} = Gtk2::EventBox->new;
 
@@ -93,20 +93,229 @@ sub INIT_INSTANCE {
     $self->{event_box}->signal_connect(motion_notify_event => \&motion_notify, $self);
 
     $self->signal_connect(key_press_event => \&key_press_event, $self);
-
-    # why do not these work? 
-    # event box does not have focus? does not accept focus? does not accept key presses?
-#    $self->{event_box}->add_events('key-press-mask');
-#    $self->{event_box}->signal_connect(key_press_event => \&key_press_event, $self);
+    $self->signal_connect(key_release_event => \&key_release_event, $self);
         
     # why do I need to set these?
     $self->{zoom_factor} = 1.2;
     $self->{step} = 8;
 
-    $self->{w_offset} = 0;
-    $self->{h_offset} = 0;
-    @{$self->{bg_color}} = (0,0,0);
+    $self->{offset} = [0, 0];
+    @{$self->{bg_color}} = (0, 0, 0);
 
+    @{$self->{menu}} = ('Zoom _in', 
+			'Zoom _out',
+			'Zoom to pre_vious',
+			'',
+			'_Zoom', 
+			'_Pan', 
+			'_Select', 
+			'_Measure',
+			'',
+			'_Line',
+			'Path',
+			'_Rectangle',
+			'_Ellipse',
+			'Polygon',
+			'',
+			'Reselect',
+			'_Clear selection',
+			'',
+			'Select within',
+			'Select intersecting',
+			'',
+			'Set _background color..',
+			'_Export as PNG',
+			'Res_tore');
+
+    %{$self->{menu_action}} = 
+	('Zoom _in' => 
+	 sub { 
+	     my ($item, $self) = @_;
+	     $self->delete_rubberband;
+	     $self->zoom_in(); 
+	 },
+	 'Zoom _out' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->zoom_out(); 
+	 },
+	 'Zoom to pre_vious' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->zoom_to(@{$self->{previous_zoom}});
+	 },
+	 '_Zoom' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->{rubberbanding} = 'zoom rect';
+	 },
+	 '_Pan' => 
+	 sub { my ($item, $self) = @_; 
+	       $self->delete_rubberband;
+	       $self->{rubberbanding} = 'pan line';
+	   },
+	 '_Select' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->{rubberbanding} = 'select rect';
+	 },
+	 '_Clear selection' => 
+	 sub { my ($item, $self) = @_;
+	       $self->delete_rubberband;
+	       if ($self->{selection}) {
+		   delete $self->{selection};
+		   $self->restore_pixmap;
+	       }
+	   },
+	 'Reselect' =>
+	 sub { my ($item, $self) = @_;
+	       my $layer = $self->selected_layer();
+	       if ($layer and $self->{selection}) {
+		   $layer->select() unless $self->{_control_down};
+		   $layer->select($self->{_selecting} => $self->{selection});
+		   $self->signal_emit('features_selected');
+	       }
+	   },
+	 'Select within' => 
+	 sub { 
+	     my ($item, $self) = @_;
+	     $self->{_selecting} = 'that_are_within';
+	 },
+	 'Select intersecting' => 
+	 sub { 
+	     my ($item, $self) = @_;
+	     $self->{_selecting} = 'that_intersect';
+	 },
+	 '_Measure' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->{rubberbanding} = 'measure line';
+	 },
+	 '_Line' => 
+	 sub { 
+	     my ($item, $self) = @_;
+	     $self->delete_rubberband;
+	     $self->{rubberbanding} = 'measure line';
+	 },
+	 'Path' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->{rubberbanding} = 'measure path';
+	 },
+	 '_Rectangle' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     for ($self->{rubberbanding}) {
+		 /zoom/ && do { 
+		     $self->{rubberbanding} = 'zoom rect';
+		 };
+		 /select/ && do { 
+		     $self->{rubberbanding} = 'select rect';
+		 };
+		 /measure/ && do { 
+		     $self->{rubberbanding} = 'measure rect';
+		 };
+	     }
+	 },
+	 '_Ellipse' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     $self->{rubberbanding} = 'measure ellipse';
+	 },
+	 'Polygon' => 
+	 sub { 
+	     my ($item, $self) = @_; 
+	     $self->delete_rubberband;
+	     for ($self->{rubberbanding}) {
+		 /select/ && do { 
+		     $self->{rubberbanding} = 'select polygon';
+		 };
+		 /measure/ && do { 
+		     $self->{rubberbanding} = 'measure polygon';
+		 };
+	     }
+	 },
+	 'Set _background color..' => 
+	 sub { my ($item, $self) = @_;
+	       $self->delete_rubberband;
+	       my $color = $self->{bg_color};
+	       my $d = Gtk2::ColorSelectionDialog->new('Color for the background');
+	       my $c = new Gtk2::Gdk::Color ($color ? $color->[0]*257 : 0,
+					     $color ? $color->[1]*257 : 0,
+					     $color ? $color->[2]*257 : 0);
+	       $d->colorsel->set_current_color($c);
+	       
+	       if ($d->run eq 'ok') {
+		   $c = $d->colorsel->get_current_color;
+		   $d->destroy;
+		   $self->{bg_color} = 
+		       [int($c->red/257),int($c->green/257),int($c->blue/257)];
+		   $self->render;
+	       } else {
+		   $d->destroy};
+	   },
+	 '_Export as PNG' =>
+	 sub { my ($item, $self) = @_;
+	       $self->delete_rubberband;
+	       my $filename;
+	       my $type = 'png';
+	       my $file_chooser =
+		   Gtk2::FileChooserDialog->new ('Export as a PNG image',
+						 undef, 'save',
+						 'gtk-cancel' => 'cancel',
+						 'gtk-ok' => 'ok');
+	       
+	       my $folder = $file_chooser->get_current_folder;
+	       
+	       $file_chooser->set_current_folder($self->{folder}) if $self->{folder};
+	       
+	       if ('ok' eq $file_chooser->run) {
+		   # you can get the user's selection as a filename or a uri.
+		   $self->{folder} = $file_chooser->get_current_folder;
+		   $filename = $file_chooser->get_filename;
+	       }
+	       
+	       $file_chooser->set_current_folder($folder);	       
+	       $file_chooser->destroy;
+	       $self->render(filename=>$filename, type=>$type) if $filename;
+	   },
+	 'Res_tore' => 
+	 sub { 
+	     my ($item, $self) = @_;
+	     $self->delete_rubberband;
+	     $self->restore_pixmap;
+	 });
+    $self->{rubberbanding} = 'zoom rect';
+    $self->{_selecting} = 'that_are_within';
+}
+
+sub close {
+    my $self = shift;
+    delete $self->{image};
+    delete $self->{event_box};
+    delete $self->{pixmap};
+    delete $self->{pixmap_backup};
+    delete $self->{pixbuf};
+    delete $self->{old_hadj};
+    delete $self->{old_vadj};
+}
+
+sub size_allocate {
+    my($image, $allocation, $self) = @_;
+    my @old_v = (0, 0);
+    @old_v = @{$self->{viewport_size}} if $self->{viewport_size};
+    my @v = $allocation->values;
+    @{$self->{viewport_size}} = @v[2..3];
+    $self->render() if $v[2] != $old_v[0] or $v[3] != $old_v[1];
+    return 0;
 }
 
 =pod
@@ -119,22 +328,20 @@ some initializations which cannot be done automagically (for some reason unknown
 
 sub my_inits {
     my($self) = @_;
+    $self->{inited} = 1;
     
-    $self->{ha} = $self->get_hadjustment();
-    $self->{va} = $self->get_vadjustment();
+    my $hs = $self->get_hscrollbar();
+    my $vs = $self->get_vscrollbar();
 
-    $self->{ha}->signal_connect("value-changed" => \&value_changed, $self);
-    $self->{va}->signal_connect("value-changed" => \&value_changed, $self);
+    $hs->signal_connect("value-changed" => \&value_changed, $self);
+    $vs->signal_connect("value-changed" => \&value_changed, $self);
     
-    $self->{ha}->signal_connect("changed" => \&changed, $self);
-    $self->{va}->signal_connect("changed" => \&changed, $self);
-
     $self->add_with_viewport($self->{event_box});
 }
 
 =pod
 
-=head2 add_layer($layer,$do_not_zoom_to);
+=head2 add_layer($layer, $do_not_zoom_to);
 
 adds a spatial data layer to the top of the overlay, the default
 behavior is to zoom to the new layer
@@ -142,22 +349,29 @@ behavior is to zoom to the new layer
 =cut
 
 sub add_layer {
-    my($self,$layer,$do_not_zoom_to) = @_;
+    my($self, $layer, $do_not_zoom_to) = @_;
+
     my $ref = ref($layer);
     return unless $ref =~ /Geo::/;
-    push @{$self->{layers}},$layer;
+    push @{$self->{layers}}, $layer;
 
     # MUST zoom to if this is the first layer
-    $do_not_zoom_to = 0 if @{$self->{layers}} == 1; 
+    $do_not_zoom_to = 0 unless $self->{first_added};
 
-    $self->my_inits unless $self->{ha};
+    $self->my_inits unless $self->{inited};
     unless ($do_not_zoom_to) {
-	$self->zoom_to($layer);
-	$self->set_adjustments();
-	$self->render();
+	$self->zoom_to($layer) if $self->{viewport_size};
     }
+    $self->{first_added} = 1;
     return $#{$self->{layers}};
+}
 
+sub selected_layer {
+    my($self, $index) = @_;
+    if (defined $index) {
+	$self->{_selected} = $self->get_layer_by_index($index);
+    }
+    return $self->{_selected};
 }
 
 =pod
@@ -178,71 +392,120 @@ sub layer_count {
     return $count;
 }
 
+sub has_layer {
+    my($self, $layer) = @_;
+    for (@{$self->{layers}}) {
+	next unless ref($_) eq ref($layer);
+	return 1 if ref($_) eq ref($layer);
+    }
+    return 0;
+}
+
+sub index_of_layer {
+    my($self, $name) = @_;
+    my $i = $#{$self->{layers}};
+    for my $layer (@{$self->{layers}}) {
+	return $i if $layer->name() eq $name;
+	$i--;
+    }
+    return undef;
+}
+
 sub get_layer_by_index {
-    my($self,$index) = @_;
+    my($self, $index) = @_;
     return unless $index >= 0 and $index <= $#{$self->{layers}};
     return $self->{layers}->[$#{$self->{layers}} - $index];
 }
 
 sub get_layer_by_name {
-    my($self,$name) = @_;
+    my($self, $name) = @_;
     for my $layer (@{$self->{layers}}) {
-	return $layer if $layer->{name} eq $name;
+	return $layer if $layer->name() eq $name;
     }
+}
+
+sub remove_layer_by_index {
+    my($self, $index) = @_;
+    my $n = $#{$self->{layers}};
+    return 0 unless $index >= 0 and $index <= $n;
+    splice(@{$self->{layers}}, $n-$index, 1);
+    delete $self->{_selected} unless $self->has_layer($self->{_selected});
+    return 1;
+}
+
+sub remove_layer_by_name {
+    my($self, $name) = @_;
+    for my $index (0..$#{$self->{layers}}) {
+	if ($self->{layers}->[$index]->name() eq $name) {
+	    splice(@{$self->{layers}}, $index, 1);
+	    delete $self->{_selected} unless $self->has_layer($self->{_selected});
+	    return 1;
+	}
+    }    
+    return 0;
 }
 
 =pod
 
-=head2 zoom_to($layer) or zoom_to($minx,$miny,$maxx,$maxy)
+=head2 zoom_to($layer) or zoom_to($minx, $miny, $maxx, $maxy)
 
 sets the given bounding box as the world
 
 =cut
 
 sub zoom_to {
-    # usage: ->zoom_to(layer) or ->zoom_to(minX,minY,maxX,maxY)
+    # usage: ->zoom_to(layer) or ->zoom_to(minX, minY, maxX, maxY)
 
     my $self = shift;
 
-    # up left (minX,maxY) is fixed, adjust maxX or minY
+    # up left (minX, maxY) is fixed, adjust maxX or minY
 
-    my @bounds; # minX,minY,maxX,maxY
+    my @bounds; # minX, minY, maxX, maxY
 
     if (@_ == 1) {
 	my $layer = shift;
 	return unless $self->{layers} and @{$self->{layers}};
-	if (ref($layer) eq 'Geo::Raster' or ref($layer) eq 'Geo::Vector') {
-	    @bounds = $layer->world(1);
-	} elsif (ref($layer) eq 'Geo::Shapelib') {
-	    @bounds[0..1] = @{$layer->{MinBounds}}[0..1];
-	    @bounds[2..3] = @{$layer->{MaxBounds}}[0..1];
-	} else {
-	    return;
-	}
+	@bounds = $layer->world(of_GDAL=>1);
+	$self->{offset} = [0, 0];
+    } elsif (@_ == 5) {
+	my($minX, $maxY, $pixel_size, @offset) = @_;
+	$pixel_size = 1 if $pixel_size <= 0;
+	$self->{pixel_size} = $pixel_size;
+	@bounds = ($minX,
+		   $maxY-$pixel_size*$self->{viewport_size}->[1],
+		   $minX+$pixel_size*$self->{viewport_size}->[0],
+		   $maxY);
+	$self->{offset} = [@offset];
     } else {
 	@bounds = @_;
+	$self->{offset} = [0, 0];
     }
 
-    my $ws = $self->{ha}->page_size();
-    my $hs = $self->{va}->page_size();
-    $self->{canvas_size} = [$ws,$hs];
-    $self->{pixel_size} = max(($bounds[2]-$bounds[0])/$ws,($bounds[3]-$bounds[1])/$hs);
-    
+    # sanity check
+    $bounds[2] = $bounds[0]+1 if $bounds[2] <= $bounds[0];
+    $bounds[3] = $bounds[1]+1 if $bounds[3] <= $bounds[1];
+
+    my($w, $h) = @{$self->{viewport_size}};
+    @{$self->{canvas_size}} = @{$self->{viewport_size}};
+    $self->{pixel_size} = max(($bounds[2]-$bounds[0])/$w,($bounds[3]-$bounds[1])/$h);
+
     $self->{minX} = $bounds[0];
     $self->{maxY} = $bounds[3];
-    $self->{maxX} = $bounds[0]+$self->{pixel_size}*$ws;
-    $self->{minY} = $bounds[3]-$self->{pixel_size}*$hs;
+    $self->{maxX} = $bounds[0]+$self->{pixel_size}*$w;
+    $self->{minY} = $bounds[3]-$self->{pixel_size}*$h;
 
-    $self->{ha}->lower(0);
-    $self->{ha}->upper($ws);
-    $self->{ha}->value(0);
-    
-    $self->{va}->lower(0);
-    $self->{va}->upper($hs);
-    $self->{va}->value(0);
+    $self->render() if $self->{first_added};
+    $self->signal_emit ('extent-widened');
+}
 
-    $self->set_adjustments();
-    $self->render();
+sub world { # used in vector::rasterize
+    my $self = shift;
+    return $self->get_focus;
+}
+
+sub size { # similar to Geo::Raster (M, N) i.e. )height, width)
+    my $self = shift;
+    return ($self->{viewport_size}->[1], $self->{viewport_size}->[0]);
 }
 
 =pod
@@ -260,18 +523,13 @@ sub zoom_to_all {
     for my $layer (@{$self->{layers}}) {
 	my @s;
 	if (ref($layer) eq 'Geo::Raster' or ref($layer) eq 'Geo::Vector') {
-	    @s = $layer->world(1);
-	} elsif (ref($layer) eq 'Geo::Shapelib') {
-	    $s[0] = $layer->{MinBounds}->[0];
-	    $s[1] = $layer->{MinBounds}->[1];
-	    $s[2] = $layer->{MaxBounds}->[0];
-	    $s[3] = $layer->{MaxBounds}->[1];
+	    @s = $layer->world(of_GDAL=>1);
 	}
 	if (@size) {
-	    $size[0] = min($size[0],$s[0]);
-	    $size[1] = min($size[1],$s[1]);
-	    $size[2] = max($size[2],$s[2]);
-	    $size[3] = max($size[3],$s[3]);
+	    $size[0] = min($size[0], $s[0]);
+	    $size[1] = min($size[1], $s[1]);
+	    $size[2] = max($size[2], $s[2]);
+	    $size[3] = max($size[3], $s[3]);
 	} else {
 	    @size = @s;
 	}
@@ -281,93 +539,65 @@ sub zoom_to_all {
 
 =pod
 
-=head2 set_event_handler($event_handler,$user_param)
+=head2 set_event_handler($event_handler, $user_param)
 
 sets a subroutine which gets called when something happens in the
 widget, the sub is called like this:
-$event_handler->($user_param,$event,@xy);
+$event_handler->($user_param, $event, @xy);
 
 =cut
 
 sub set_event_handler {
-    my($self,$event_handler,$user_param) = @_;
+    my($self, $event_handler, $user_param) = @_;
     $self->{event_handler} = $event_handler;
     $self->{event_handler_user_param} = $user_param;
 }
 
 =pod
 
-=head2 set_draw_on($draw_on,$user_param)
+=head2 set_draw_on($draw_on, $user_param)
 
 sets a subroutine which gets called whenever a new pixmap is drawn for
 the widget, the sub is called like this:
-$draw_on->($user_param,$pixmap);
+$draw_on->($user_param, $pixmap);
 
 =cut
 
 sub set_draw_on {
-    my($self,$draw_on,$user_param) = @_;
+    my($self, $draw_on, $user_param) = @_;
     $self->{draw_on} = $draw_on;
     $self->{draw_on_user_param} = $user_param;
 }
 
-sub set_adjustments {
-    my($self) = @_;
-
-    $self->{w_max} = $self->{ha}->upper() - $self->{ha}->page_size();
-    $self->{h_max} = $self->{va}->upper() - $self->{va}->page_size();
-
-    @{$self->{viewport_size}} = (int($self->{ha}->page_size),int($self->{va}->page_size));
-
-    $self->{w_offset} = $self->{ha}->value();
-    $self->{h_offset} = $self->{va}->value();
-}
-
 sub value_changed {
-    my($adjustment,$self) = @_;
-
-    my $w_offset = $self->{w_offset};
-    my $h_offset = $self->{h_offset};
-
-    $self->set_adjustments();
-
-    return if $w_offset == $self->{w_offset} and $h_offset == $self->{h_offset};
-
+    my($scrollbar, $self) = @_;
+    $self->{offset} = [$self->get_hadjustment()->value(), $self->get_vadjustment()->value()];
     $self->render();
-
+    return 1;
 }
-
-sub changed {
-    my($adjustment,$self) = @_;
-    
-    return unless $self->{viewport_size}; # not yet operational
-
-    my @tmp = @{$self->{viewport_size}};
-
-    $self->set_adjustments();
-
-    return if $tmp[0] == $self->{viewport_size}->[0] and $tmp[1] == $self->{viewport_size}->[1];
-
-    $self->render();
-}
-
-# provided for the user: (in world coordinates)
 
 =pod
 
-=head2 visible_area
+=head2 get_focus
 
-returns ($minx,$maxy,$maxx,$miny), the visible area of the world
+Returns the visible area or the selection, if one exists,
+as ($minx, $miny, $maxx, $maxy).
 
 =cut
 
-sub visible_area {
+sub get_focus {
     my($self) = @_;
-    my @ul = ($self->{minX}+$self->{w_offset}*$self->{pixel_size},
-	      $self->{maxY}-$self->{h_offset}*$self->{pixel_size});
-    my @dr = ($ul[0]+$self->{viewport_size}->[0]*$self->{pixel_size},
-	      $ul[1]-$self->{viewport_size}->[1]*$self->{pixel_size});
-    return (@ul,@dr);
+    if ($self->{selection} and 
+	($self->{selection}->GetGeometryType == $Geo::OGR::wkbPolygon or
+	 $self->{selection}->GetGeometryType == $Geo::OGR::wkbPolygon25D)) {
+	my $e = $self->{selection}->GetEnvelope;
+	return ($e->[0], $e->[2], $e->[1], $e->[3]);
+    } else {
+	my $minX = $self->{minX}+$self->{offset}[0]*$self->{pixel_size};
+	my $maxY = $self->{maxY}-$self->{offset}[1]*$self->{pixel_size};
+	return ($minX, $maxY-$self->{viewport_size}->[1]*$self->{pixel_size},
+		$minX+$self->{viewport_size}->[0]*$self->{pixel_size}, $maxY);
+    }
 }
 
 =pod
@@ -375,19 +605,13 @@ sub visible_area {
 =head2 render(key=>value,..)
 
 Does the actual rendering by calling (creating) a new
-Gtk2::Ex::Geo::Renderer object. Currently used parameters:
-
-reuse_pixbuf=>boolean
-
-    whether to render the layers
+Gtk2::Ex::Geo::Renderer object. Creates the pixmap for the
+image. Deletes the backup pixmap if one exists. Currently used
+parameters:
 
 filename=>filename, type=>type
 
     if filename is set, calls pixbuf->save with given options
-
-do_not_draw_selection=>boolean
-
-    prevents drawing of the selection (only for internal use)
 
 =cut
 
@@ -395,123 +619,243 @@ sub render {
     my $self = shift;
     my %opt = @_;
 
-    return unless $self->{layers} and @{$self->{layers}};
+    return unless $self->{layers} and @{$self->{layers}} and $self->{viewport_size}->[0];
 
-    my $xalign = $self->{w_max} == 0 ? 0 : $self->{ha}->value()/$self->{w_max};
-    my $yalign = $self->{h_max} == 0 ? 0 : $self->{va}->value()/$self->{h_max};
+    my @tmp = ($self->{minX}, $self->{maxY}, $self->{pixel_size}, @{$self->{offset}});
+    $self->{previous_zoom} = $self->{current_zoom} ? [@{$self->{current_zoom}}] : [@tmp];
+    $self->{current_zoom} = [@tmp];
 
-    $xalign = max(min($xalign,1),0);
-    $yalign = max(min($yalign,1),0);
-
-    $self->{pixbuf} = Gtk2::Ex::Geo::Renderer->new($self->{layers},
-						   $self->{minX},$self->{maxY},$self->{pixel_size},
+    $self->{pixbuf} = Gtk2::Ex::Geo::Renderer->new($self->{layers}, @tmp, 
 						   @{$self->{viewport_size}},
-						   $self->{w_offset},$self->{h_offset},
-						   @{$self->{bg_color}}) unless $opt{reuse_pixbuf};
-    
-    $self->{pixbuf}->save(@_) if $opt{filename};
+						   @{$self->{bg_color}}, $self);
+    return unless $self->{pixbuf};
+
+    if ($opt{filename}) {
+	my $filename = $opt{filename};
+	delete $opt{filename};
+	my $type = $opt{type};
+	delete $opt{type};
+	# other options...
+	$self->{pixbuf}->save($filename, $type);
+    }
+
+    $self->{image}->set_from_pixbuf(undef);
     
     $self->{pixmap} = $self->{pixbuf}->render_pixmap_and_mask(0);
-    $self->{image}->set_from_pixmap($self->{pixmap},undef);
-    $self->{image}->set_size_request(@{$self->{canvas_size}});
-    $self->{image}->set_alignment($xalign,$yalign);
-    
-    $self->{draw_on}->($self->{draw_on_user_param},$self->{pixmap}) if $self->{draw_on};
+    delete $self->{pixmap_backup};
 
-    $self->draw_selection if $self->{selection} and not $opt{do_not_draw_selection};
+    $self->{image}->set_from_pixmap($self->{pixmap}, undef);
 
-# call set from pixmap here?
+    $self->{old_hadj} = $self->get_hscrollbar->get_adjustment; # prevents a warning
+    $self->get_hscrollbar->set_adjustment
+	(Gtk2::Adjustment->new($self->{offset}[0], 0, $self->{canvas_size}[0], $self->{viewport_size}[0]/20,
+			       $self->{viewport_size}[0], $self->{viewport_size}[0]));
+
+    $self->{old_vadj} = $self->get_vscrollbar->get_adjustment; # prevents a warning
+    $self->get_vscrollbar->set_adjustment
+	(Gtk2::Adjustment->new($self->{offset}[1], 0, $self->{canvas_size}[1], $self->{viewport_size}[1]/20,
+			       $self->{viewport_size}[1], $self->{viewport_size}[1]));
     
+    $self->{draw_on}->($self->{draw_on_user_param}, $self->{pixmap}) if $self->{draw_on};
+
+    $self->draw_selection; # if $self->{selection};
 }
 
-sub draw_selection {
-    my($self) = @_;
-    my @p = $self->point2pixmap_pixel(@{$self->{selection}}[0..1]);
-    my @q = $self->point2pixmap_pixel(@{$self->{selection}}[2..3]);
-    my $gc = new Gtk2::Gdk::GC $self->{pixmap};
-    $gc->set_rgb_fg_color(Gtk2::Gdk::Color->new(65535,65535,0));
-    $gc->set_line_attributes(2,'GDK_LINE_ON_OFF_DASH','GDK_CAP_NOT_LAST','GDK_JOIN_MITER');
-    $self->{pixmap}->draw_rectangle($gc,0,$p[0],$q[1],$q[0]-$p[0],$p[1]-$q[1]);
+## @method
+# Render a Geo::OGR::Geometry on the pixmap of the overlay using a given graphics context.
+# Call update_image after you are finished with drawing on the pixmap.
+sub render_geometry {
+    my($self, $gc, $geom) = @_;
+    my $n = $geom->GetGeometryCount;
+    if ($n) {
+	for my $i (0..$n-1) {
+	    my $g = $geom->GetGeometryRef($i);
+	    $self->render_geometry($gc, $g);
+	}
+    } else {
+	my $type = $geom->GetGeometryType;
+      SWITCH: {
+	  if ($type == $Geo::OGR::wkbPoint or
+	      $type == $Geo::OGR::wkbMultiPoint or
+	      $type == $Geo::OGR::wkbPoint25D or
+	      $type == $Geo::OGR::wkbMultiPoint25D) {
+
+	      for my $i (0..$geom->GetPointCount-1) {
+		  my @p = ($geom->GetX($i), $geom->GetY($i));
+		  @p = $self->point2pixmap_pixel(@p);
+		  $self->{pixmap}->draw_line($gc, $p[0]-4, $p[1], $p[0]+4, $p[1]);
+		  $self->{pixmap}->draw_line($gc, $p[0], $p[1]-4, $p[0], $p[1]+4);
+	      }
+
+	      last SWITCH; 
+	  }
+	  if ($type == $Geo::OGR::wkbLineString or
+	      $type == $Geo::OGR::wkbPolygon or
+	      $type == $Geo::OGR::wkbMultiLineString or
+	      $type == $Geo::OGR::wkbMultiPolygon or
+	      $type == $Geo::OGR::wkbLineString25D or
+	      $type == $Geo::OGR::wkbPolygon25D or
+	      $type == $Geo::OGR::wkbMultiLineString25D or
+	      $type == $Geo::OGR::wkbMultiPolygon25D) { 
+	      
+	      my @points;
+	      for my $i (0..$geom->GetPointCount-1) {
+		  my @p = ($geom->GetX($i), $geom->GetY($i));
+		  my @q = $self->point2pixmap_pixel(@p);
+		  push @points, @q;
+	      }
+	      $self->{pixmap}->draw_lines($gc, @points);
+
+	      last SWITCH; 
+	  }
+      }
+    }
 }
 
 =pod
 
-=head2 zoom($w_offset,$h_offset,$pixel_size)
+=head2 create_backup_pixmap
+
+Creates a backup pixmap unless one already exists.
+
+=cut
+
+sub create_backup_pixmap {
+    my($self) = @_;
+    return if $self->{pixmap_backup};
+    $self->{pixmap_backup} = Gtk2::Gdk::Pixmap->new($self->{pixmap}, @{$self->{viewport_size}}, -1);
+    my $gc = Gtk2::Gdk::GC->new($self->{pixmap_backup});
+    $self->{pixmap_backup}->draw_drawable($gc, $self->{pixmap}, 0, 0, 0, 0, -1, -1);
+}
+
+=pod
+
+=head2 restore_pixmap
+
+Restores the pixmap to the state it was right after last call to
+create_backup_pixmap that actually had an effect.
+
+=cut
+
+sub restore_pixmap {
+    my($self) = @_;
+    return unless $self->{pixmap_backup};
+    my $gc = Gtk2::Gdk::GC->new($self->{pixmap});
+    $self->{pixmap}->draw_drawable($gc, $self->{pixmap_backup}, 0, 0, 0, 0, -1, -1);
+    $self->update_image;
+}
+
+=pod
+
+=head2 update_image
+
+Updates the image on the screen to show the changes in pixmap.
+
+=cut
+
+sub update_image {
+    my($self) = @_;
+    $self->draw_selection if $self->{selection};
+    $self->{image}->set_from_pixbuf(undef);
+    $self->{image}->set_from_pixmap($self->{pixmap}, undef);
+}
+
+sub draw_selection {
+    my($self) = @_;
+
+    $self->create_backup_pixmap;
+	
+    my $gc = Gtk2::Gdk::GC->new($self->{pixmap});
+    $gc->set_rgb_fg_color(Gtk2::Gdk::Color->new(65535,0,0));
+    
+    my $layer = $self->selected_layer;
+    $layer->render_selection($gc, $self) if $layer;
+
+    if ($self->{selection}) {
+	my $type = $self->{selection}->GetGeometryType;
+	unless ($type == $Geo::OGR::wkbPoint or $type == $Geo::OGR::wkbPoint25D) {
+	    $gc->set_rgb_fg_color(Gtk2::Gdk::Color->new(65535, 65535, 0));
+	    $gc->set_line_attributes(2,'GDK_LINE_ON_OFF_DASH','GDK_CAP_NOT_LAST','GDK_JOIN_MITER');
+	    $self->render_geometry($gc, $self->{selection});
+	}
+    }
+}
+
+=pod
+
+=head2 zoom($w_offset, $h_offset, $pixel_size)
 
 select a part of the world into the visible area
 
 =cut
 
 sub zoom {
-    my($self,$w_offset,$h_offset,$pixel_size) = @_;
+    my($self, $w_offset, $h_offset, $pixel_size, $zoomed_in) = @_;
 
-    $self->{w_offset} = $w_offset;
-    $self->{h_offset} = $h_offset;
+    $self->{offset} = [$w_offset, $h_offset];
+    
+    # sanity check
+    $pixel_size = 1 if $pixel_size <= 0;
     $self->{pixel_size} = $pixel_size;
 
     my $w = ($self->{maxX}-$self->{minX})/$self->{pixel_size};
     my $h = ($self->{maxY}-$self->{minY})/$self->{pixel_size};
 
-    $self->{ha}->upper(max($w,$self->{ha}->page_size()));
-    $self->{va}->upper(max($h,$self->{va}->page_size()));
+    $self->{canvas_size} = [$w, $h];
 
-    $w = $self->{ha}->upper();
-    $h = $self->{va}->upper();
-    $self->{canvas_size} = [$w,$h];
-    
-    $self->{w_max} = max($w - $self->{ha}->page_size(),0);
-    $self->{h_max} = max($h - $self->{va}->page_size(),0);
-    
-    $self->{w_offset} = max(min($self->{w_offset},$self->{w_max}),0);
-    $self->{h_offset} = max(min($self->{h_offset},$self->{h_max}),0);
-    
-    $self->{ha}->value($self->{w_offset});
-    $self->{va}->value($self->{h_offset});
-    
-    $self->set_adjustments();
     $self->render();
+    if ($zoomed_in) {
+	$self->signal_emit ('zoomed-in');
+    } else {
+	$self->signal_emit ('extent-widened');
+    }
 }
 
 sub _zoom { 
-    my($self,$in,$event,$center_x,$center_y) = @_;
+    my($self, $in, $event, $center_x, $center_y, $zoomed_in) = @_;
 
     return unless $self->{layers} and @{$self->{layers}};
 
-    my $old_w_offset = $self->{w_offset};
-    my $old_h_offset = $self->{h_offset};
+    my @old_offset = @{$self->{offset}};
 
-    # the center point should stay where it is unless center is not defined
-    $center_x = $self->{minX} + ($self->{w_offset}+$self->{viewport_size}->[0]/2)*$self->{pixel_size} unless defined $center_x;
-    $center_y = $self->{maxY} - ($self->{h_offset}+$self->{viewport_size}->[1]/2)*$self->{pixel_size} unless defined $center_y;
+    # the center point should stay where it is unless center is defined
+    $center_x = $self->{minX} + 
+	($self->{offset}[0]+$self->{viewport_size}->[0]/2)*$self->{pixel_size} unless defined $center_x;
+    $center_y = $self->{maxY} - 
+	($self->{offset}[1]+$self->{viewport_size}->[1]/2)*$self->{pixel_size} unless defined $center_y;
 
-    $self->{pixel_size} = $in ? $self->{pixel_size} / $self->{zoom_factor} : $self->{pixel_size} * $self->{zoom_factor};
+    $self->{pixel_size} = $in ? 
+	$self->{pixel_size} / $self->{zoom_factor} : 
+	$self->{pixel_size} * $self->{zoom_factor};
 
-    $self->{w_offset} = int(($center_x - $self->{minX})/$self->{pixel_size} - $self->{viewport_size}->[0]/2);
-    $self->{h_offset} = int(($self->{maxY} - $center_y)/$self->{pixel_size} - $self->{viewport_size}->[1]/2);
+    $self->{offset} = 
+	[int(($center_x - $self->{minX})/$self->{pixel_size} - $self->{viewport_size}->[0]/2),
+	 int(($self->{maxY} - $center_y)/$self->{pixel_size} - $self->{viewport_size}->[1]/2)];
 
-    $self->zoom($self->{w_offset},$self->{h_offset},$self->{pixel_size});
+    $self->zoom(@{$self->{offset}}, $self->{pixel_size}, $zoomed_in);
 
-    $self->{event_coordinates}->[0] += $self->{w_offset} - $old_w_offset;
-    $self->{event_coordinates}->[1] += $self->{h_offset} - $old_h_offset;
+    for (0, 1) {
+	$self->{event_coordinates}->[$_] += $self->{offset}[$_] - $old_offset[$_];
+    }
     $self->event_handler($event) if $event;
 }
 
 =pod
 
-=head2 zoom_in($event,$center_x,$center_y)
+=head2 zoom_in($event, $center_x, $center_y)
 
 zooms in a zoom_factor amount
 
 =cut
 
 sub zoom_in { 
-    my($self,$event,$center_x,$center_y) = @_;
-    $self->_zoom(1,$event,$center_x,$center_y);
+    my($self, $event, $center_x, $center_y) = @_;
+    $self->_zoom(1, $event, $center_x, $center_y, 1);
 }
 
 =pod
 
-=head2 zoom_out($event,$center_x,$center_y)
+=head2 zoom_out($event, $center_x, $center_y)
 
 zooms out a zoom_factor amount
 
@@ -520,48 +864,39 @@ note: may enlarge the world
 =cut
 
 sub zoom_out { 
-    my($self,$event,$center_x,$center_y) = @_;
-    if ($self->{w_offset} == 0 and $self->{h_offset} == 0) {
+    my($self, $event, $center_x, $center_y) = @_;
+    if ($self->{offset}[0] == 0 and $self->{offset}[1] == 0) {
 	my $dx = ($self->{maxX}-$self->{minX})*$self->{zoom_factor}/6.0;
 	my $dy = ($self->{maxY}-$self->{minY})*$self->{zoom_factor}/6.0;
-	$self->zoom_to($self->{minX}-$dx,$self->{minY}-$dy,$self->{maxX}+$dx,$self->{maxY}+$dy);
+	$self->zoom_to($self->{minX}-$dx, $self->{minY}-$dy, $self->{maxX}+$dx, $self->{maxY}+$dy);
     } else {
-	$self->_zoom(0,$event,$center_x,$center_y);
+	$self->_zoom(0, $event, $center_x, $center_y);
     }
 }
 
 =pod
 
-=head2 pan($w_move,$h_move,$event)
+=head2 pan($w_move, $h_move, $event)
 
 pans the viewport
 
 =cut
 
 sub pan {
-    my($self,$w_move,$h_move,$event) = @_;
+    my($self, $w_move, $h_move, $event) = @_;
 
-    $self->{event_coordinates}->[0] += floor($w_move);
-    $self->{event_coordinates}->[1] += floor($h_move);
+    $w_move = floor($w_move);
+    $h_move = floor($h_move);
+    
+    $self->{event_coordinates}[0] += $w_move;
+    $self->{event_coordinates}[1] += $h_move;
 
-    my $new_w_offset = $self->{w_offset} + floor($w_move);
-    my $new_h_offset = $self->{h_offset} + floor($h_move);
-
-    $new_w_offset = max(min($new_w_offset,$self->{w_max}),0);
-    $new_h_offset = max(min($new_h_offset,$self->{h_max}),0);
-
-#    return if ($new_w_offset == $self->{w_offset} and $new_h_offset == $self->{h_offset});
-
-    $self->{w_offset} = $new_w_offset;
-    $self->{ha}->value($self->{w_offset});
-    $self->{h_offset} = $new_h_offset;
-    $self->{va}->value($self->{h_offset});
-
-    $self->set_adjustments();
-
+    $self->{offset} = [$self->{offset}[0] + $w_move, $self->{offset}[1] + $h_move];
+	
     $self->render();
-
+    
     $self->event_handler($event) if $event;
+    $self->signal_emit ('extent-widened');
 }
 
 =pod
@@ -578,330 +913,458 @@ move and release
 =cut
 
 sub key_press_event {
-    my($self,$event) = @_;
+    my($self, $event) = @_;
 
-    return unless $self->{layers} and @{$self->{layers}};
+    return 0 unless $self->{layers} and @{$self->{layers}};
     
     # if this were an event box handler like button press
-#    my(undef,$event,$self) = @_;
+#    my(undef, $event, $self) = @_;
 
     my $key = $event->keyval;
     if ($key == $Gtk2::Gdk::Keysyms{plus}) {
-	$self->zoom_in($event); # ,$self->event_pixel2point());
+	$self->zoom_in($event); # , $self->event_pixel2point());
     } elsif ($key == $Gtk2::Gdk::Keysyms{minus}) {
-	$self->zoom_out($event); # ,$self->event_pixel2point());
+	$self->zoom_out($event); # , $self->event_pixel2point());
     } elsif ($key == $Gtk2::Gdk::Keysyms{Right}) {
-	$self->pan($self->{viewport_size}->[0]/$self->{step},0,$event);
+	$self->pan($self->{viewport_size}->[0]/$self->{step}, 0, $event);
     } elsif ($key == $Gtk2::Gdk::Keysyms{Left}) {
-	$self->pan(-$self->{viewport_size}->[0]/$self->{step},0,$event);
+	$self->pan(-$self->{viewport_size}->[0]/$self->{step}, 0, $event);
     } elsif ($key == $Gtk2::Gdk::Keysyms{Up}) {
-	$self->pan(0,-$self->{viewport_size}->[1]/$self->{step},$event);
+	$self->pan(0, -$self->{viewport_size}->[1]/$self->{step}, $event);
     } elsif ($key == $Gtk2::Gdk::Keysyms{Down}) {
-	$self->pan(0,$self->{viewport_size}->[1]/$self->{step},$event);
+	$self->pan(0, $self->{viewport_size}->[1]/$self->{step}, $event);
+    } elsif ($key == $Gtk2::Gdk::Keysyms{Escape}) {
+	if ($self->{rubberbanding} =~ /select/) {
+	    my $layer = $self->selected_layer();
+	    if ($layer) {
+		$layer->select() unless $self->{_control_down};
+		delete $self->{selection};
+		my $polygon = new Geo::OGR::Geometry($Geo::OGR::wkbPolygon);
+		$polygon->ACQUIRE;
+		my $r = new Geo::OGR::Geometry($Geo::OGR::wkbLinearRing);
+		my @p = @{$self->{path}};
+		if (@p > 2) {
+		    for my $p (0..$#p) {
+			$r->AddPoint($self->event_pixel2point(@{$p[$p]}));
+		    }
+		    $r->AddPoint($self->event_pixel2point(@{$p[0]}));
+		    $polygon->AddGeometry($r);
+		    $self->{selection} = $polygon;
+		    $layer->select($self->{_selecting} => $polygon);
+		    $self->signal_emit('features_selected');
+		}
+	    }
+	}
+    } elsif ($key == $Gtk2::Gdk::Keysyms{Control_L} or $key == $Gtk2::Gdk::Keysyms{Control_R}) {
+	$self->{_control_down} = 1;
+	return 0;
     } else {
 	$self->event_handler($event);
     }
-       
+    $self->delete_rubberband;
+    return 0;
+}
+
+sub key_release_event {
+    my($self, $event) = @_;
+    my $key = $event->keyval;
+    $self->{_control_down} = 0 if $Gtk2::Gdk::Keysyms{Control_L} or $Gtk2::Gdk::Keysyms{Control_R};
 }
 
 # rubberbanding yes/no?
-# if rubberbanding, what to draw when motion? line/rect/circle
+# if rubberbanding, what to draw when motion? line/rect/ellipse
 # if rubberbanding, what to do when button release? (how to cancel?) pan/zoom/select
 
-sub button_press_event {
-    my(undef,$event,$self) = @_;
+sub delete_rubberband {
+    my $self = shift;
+    delete $self->{rubberband};
+    delete $self->{rubberband_gc};
+    delete $self->{path};
+    my $gc = Gtk2::Gdk::GC->new ($self->{pixmap});
+    $self->{pixmap}->draw_pixbuf($gc, $self->{pixbuf}, 0, 0, 0, 0, -1, -1, 'GDK_RGB_DITHER_NONE', 0, 0);
+    $self->{image}->set_from_pixbuf(undef);
+    $self->{image}->set_from_pixmap($self->{pixmap}, undef);
+    $self->draw_selection;
+	
+}
 
-    return unless $self->{layers} and @{$self->{layers}};
+sub button_press_event {
+    my(undef, $event, $self) = @_;
+
+    return 0 unless $self->{layers} and @{$self->{layers}};
     $self->grab_focus;
+
+    my $handled = 0;
 
     if ($event->button == 3) {
 
 	my $menu = Gtk2::Menu->new;
-
-	my $zoom_mode = $self->{rubberbanding} =~ /zoom/;
-	$zoom_mode = $zoom_mode ? ' v' : '';
-	my $pan_mode = $self->{rubberbanding} =~ /pan/;
-	$pan_mode = $pan_mode ? ' v' : '';
-	my $select_mode = $self->{rubberbanding} =~ /select/;
-	$select_mode = $select_mode ? ' v' : '';
-	
-	my @data = ('Zoom _in','Zoom _out','',
-		    '_Zoom'.$zoom_mode,'_Pan'.$pan_mode,'_Select'.$select_mode,'_Clear selection','',
-		    'Set _background color...',
-		    '_Export as PNG');
-	
-	for (my $i = 0 ; $i < @data ; $i++) {
-	    if ($data[$i] eq '') {
+	my $i = 0;
+	for (@{$self->{menu}}) {
+	    my $menu_item = $_;
+	    if ($menu_item eq '') {
 		my $item = Gtk2::SeparatorMenuItem->new();
 		$item->show;
 		$menu->append ($item);
 		next;
+	    } 
+	    my $action = $self->{menu_action}->{$menu_item};
+	    for ($menu_item) {
+		$_ .= ' x', last if /within/ and $self->{_selecting} =~ /within/;
+		$_ .= ' x', last if /intersect/ and $self->{_selecting} =~ /intersect/;
+		$_ .= ' x', last if /_Zoom/ and $self->{rubberbanding} =~ /zoom/;
+		$_ .= ' x', last if /Pan/ and $self->{rubberbanding} =~ /pan/;
+		$_ .= ' x' if /_Select/ and $self->{rubberbanding} =~ /select/;
+		$_ .= ' x' if /Measure/ and $self->{rubberbanding} =~ /measure/;
+		$_ .= ' x' if /Line/ and $self->{rubberbanding} =~ /line/;
+		$_ .= ' x' if /Path/ and $self->{rubberbanding} =~ /path/;
+		$_ .= ' x' if /Rect/ and $self->{rubberbanding} =~ /rect/;
+		$_ .= ' x' if /Ellipse/ and $self->{rubberbanding} =~ /ellipse/;
+		$_ .= ' x' if /Polygon/ and $self->{rubberbanding} =~ /polygon/;
 	    }
-	    my $item = Gtk2::MenuItem->new ($data[$i]);
+	    my $item = Gtk2::MenuItem->new($menu_item);
 	    $item->show;
 	    $menu->append ($item);
-	    $item->{index} = $i;
-	    $item->{text} = $data[$i];
-	    $item->signal_connect(activate => \&context_menu_item, [$self, $data[$i]]);
+	    $item->{index} = $i++;
+	    $item->{text} = $menu_item;
+	    $item->signal_connect(activate => $action, $self);
 	}
 	$menu->popup(undef, undef, undef, undef, $event->button, $event->time);
+	$handled = 1;
 
     } elsif ($event->button == 1) {
 
-	@{$self->{event_coordinates}} = ($event->x,$event->y);
+	@{$self->{event_coordinates}} = ($event->x, $event->y);
 
 	if ($self->{rubberbanding}) {
-	    @{$self->{rubberband_begin}} = @{$self->{rubberband_coordinates}} = @{$self->{event_coordinates}};
-	    $self->{rubberband_begin}->[0] -= $self->{w_offset};
-	    $self->{rubberband_begin}->[1] -= $self->{h_offset};
+	    @{$self->{rubberband_begin}} = @{$self->{event_coordinates}};
 	    $self->{rubberband} = [];
 	    $self->{rubberband_gc} = Gtk2::Gdk::GC->new ($self->{pixmap});
 	    $self->{rubberband_gc}->copy($self->style->fg_gc($self->state));
 	    $self->{rubberband_gc}->set_function('invert');
 	    
-	    $self->render(reuse_pixbuf=>1, do_not_draw_selection=>1) if $self->{selection} and $self->{rubberbanding} =~ /select/;
+	    if ($self->{selection} and $self->{rubberbanding} =~ /select/) {
+		delete $self->{selection};
+		$self->restore_pixmap;
+	    }
 
+	    if ($self->{rubberbanding} =~ /path/ or $self->{rubberbanding} =~ /polygon/) {
+		push @{$self->{path}}, [@{$self->{rubberband_begin}}];
+		delete $self->{rubberband_begin};
+	    }
+
+	    $handled = 1;
 	}
 
     }
 
     $self->event_handler($event);
-}
-
-sub context_menu_item {
-    my ($item, $info) = @_;
-    my $self = shift @$info;
-    $_ = shift @$info;
-    $_ =~ s/_//g;
-  SWITCH: {
-      if (/Zoom in/) {
-	  $self->zoom_in();
-	  last SWITCH; 
-      }
-      if (/Zoom out/) {
-	  $self->zoom_out();
-	  last SWITCH; 
-      }
-      if (/Zoom/) {
-	  $self->{rubberbanding} = 'zoom rect';
-	  $self->event_handler();
-	  last SWITCH; 
-      }
-      if (/Pan/) {
-	  $self->{rubberbanding} = 'pan line';
-	  $self->event_handler();
-	  last SWITCH; 
-      }
-      if (/Select/) {
-	  $self->{rubberbanding} = 'select rect';
-	  $self->event_handler();
-	  last SWITCH; 
-      }
-      if (/Clear selection/) {
-	  if ($self->{selection}) {
-	      delete $self->{selection};
-	      $self->render(reuse_pixbuf=>1);
-	  }
-      }
-      if (/Set background color/) {
-
-	  my $color = $self->{bg_color};
-	  my $d = Gtk2::ColorSelectionDialog->new('Color for the background');
-	  my $c = new Gtk2::Gdk::Color ($color ? $color->[0]*257 : 0,
-					$color ? $color->[1]*257 : 0,
-					$color ? $color->[2]*257 : 0);
-	  $d->colorsel->set_current_color($c);
-	  
-	  if ($d->run eq 'ok') {
-	      $c = $d->colorsel->get_current_color;
-	      $self->{bg_color} = 
-		  [int($c->red/257),int($c->green/257),int($c->blue/257)];
-	      $self->render;
-	  }
-	  $d->destroy;
-
-	  last SWITCH; 
-      }
-      if (/Export as PNG/) {
-
-	  my $filename;
-	  my $type = 'png';
-
-	  my $file_chooser =
-	      Gtk2::FileChooserDialog->new ('Export as a PNG image',
-					    undef, 'save',
-					    'gtk-cancel' => 'cancel',
-					    'gtk-ok' => 'ok');
-
-	  my $folder = $file_chooser->get_current_folder;
-
-	  $file_chooser->set_current_folder($self->{folder}) if $self->{folder};
-	  
-	  if ('ok' eq $file_chooser->run) {
-	      # you can get the user's selection as a filename or a uri.
-	      $self->{folder} = $file_chooser->get_current_folder;
-	      $filename = $file_chooser->get_filename;
-	  }
-
-	  $file_chooser->set_current_folder($folder);
-    
-	  $file_chooser->destroy;
-
-	  $self->render(filename=>$filename, type=>$type) if $filename;
-
-	  last SWITCH; 
-      }   
-  }
+    return $handled;
 }
 
 sub button_release_event {
-    my(undef,$event,$self) = @_;
+    my(undef, $event, $self) = @_;
     
-    return unless $self->{layers} and @{$self->{layers}};
+    return 0 unless $self->{layers} and @{$self->{layers}};
     
-    @{$self->{event_coordinates}} = ($event->x,$event->y);
+    @{$self->{event_coordinates}} = ($event->x, $event->y);
 
+    my $handled = 0;
     if ($self->{rubberbanding} and $self->{rubberband_begin}) {
 
+	my $pm = $self->{pixmap};
+	my @rb = @{$self->{rubberband}};
+	my $rgc = $self->{rubberband_gc};
+	my @begin = @{$self->{rubberband_begin}};
 	my @end = @{$self->{event_coordinates}};
-
-	$end[0] -= $self->{w_offset};
-	$end[1] -= $self->{h_offset};
 
 	# erase & do pan or zoom 
 
 	for ($self->{rubberbanding}) {
+
+	    #$handled = 1;
+
+	    #last if $begin[0] == $end[0] and $begin[1] == $end[1];
+	    my $click = ($begin[0] == $end[0] and $begin[1] == $end[1]);
+
 	    /line/ && do { 
-		$self->{pixmap}->draw_line($self->{rubberband_gc},@{$self->{rubberband}}) if @{$self->{rubberband}};
+		$pm->draw_line($rgc, @rb) if @rb;
 	    };
 	    /rect/ && do {
-		$self->{pixmap}->draw_rectangle($self->{rubberband_gc},FALSE,@{$self->{rubberband}}) if @{$self->{rubberband}};
+		$pm->draw_rectangle($rgc, FALSE, @rb) if @rb;
 	    };
-	    /circle/ && do {
-		$self->{pixmap}->draw_arc($self->{rubberband_gc},FALSE,@{$self->{rubberband}},0,360) if @{$self->{rubberband}};
+	    /ellipse/ && do {
+		$pm->draw_arc($rgc, FALSE, @rb, 0, 64*360) if @rb;
 	    };
 
-	    $self->{image}->set_from_pixmap($self->{pixmap},undef);
+	    $self->{image}->set_from_pixbuf(undef);
+	    $self->{image}->set_from_pixmap($pm, undef);
 
-	    my @wbegin = ($self->{minX} + $self->{pixel_size} * ($self->{rubberband_coordinates}->[0]+0.5),
-			  $self->{maxY} - $self->{pixel_size} * ($self->{rubberband_coordinates}->[1]+0.5));
-	    
-	    my @wend = ($self->{minX} + $self->{pixel_size} * ($self->{event_coordinates}->[0]+0.5),
-			$self->{maxY} - $self->{pixel_size} * ($self->{event_coordinates}->[1]+0.5));
+	    my @wbegin = $self->event_pixel2point(@begin);
+	    my @wend = $self->event_pixel2point(@end);
 
 	    /pan/ && do {
-		$self->pan($self->{rubberband_begin}->[0] - $end[0], $self->{rubberband_begin}->[1] - $end[1]);
+		$self->pan($begin[0] - $end[0], $begin[1] - $end[1]);
 	    };
-	    /move/ && do {
-		my @vector = ($wend[0]-$wbegin[0],$wend[1]-$wbegin[1]);
-
-#		@{$self->{selection}} = ($wbegin[0],$wbegin[1],@vector);
-
-#               gis should have an event_handler and that should take care of
-#               moving of vertices of shapes when this function proceeds there
-
-#               this class does not have a notion of a selected layer...
-#		my ($selected,$selected_name) = $self->selected_layer();
-#		if (ref($selected) eq 'Geo::Shapelib') {
-#		    # the actual moving is in raster_window button_release_event $selected->move_selected(@vector);
-#		    $self->{raster_window}->render();
-#		}
-
-	    };
-	    /zoom/ && do {		
-		my $w_offset = min($self->{rubberband_coordinates}->[0],$self->{event_coordinates}->[0]);
-		my $h_offset = min($self->{rubberband_coordinates}->[1],$self->{event_coordinates}->[1]);
+	    /zoom/ && !$click && do {		
+		my $w_offset = min($begin[0], $end[0]);
+		my $h_offset = min($begin[1], $end[1]);
 		
-		if ($end[0] > $self->{rubberband_begin}->[0] and $end[1] > $self->{rubberband_begin}->[1]) {
-		    
-		    my $pixel_size = max(abs($wbegin[0]-$wend[0])/$self->{viewport_size}->[0],
-					  abs($wbegin[1]-$wend[1])/$self->{viewport_size}->[1]);
-		    
-		    $w_offset = int(($wbegin[0]-$self->{minX})/$pixel_size);
-		    $h_offset = int(($self->{maxY}-$wbegin[1])/$pixel_size);
-		    
-		    $self->zoom($w_offset,$h_offset,$pixel_size);
-		    
-		}
+		my $pixel_size = max(abs($wbegin[0]-$wend[0])/$self->{viewport_size}->[0],
+				     abs($wbegin[1]-$wend[1])/$self->{viewport_size}->[1]);
+		
+		$w_offset = int((min($wbegin[0], $wend[0])-$self->{minX})/$pixel_size);
+		$h_offset = int(($self->{maxY}-max($wbegin[1], $wend[1]))/$pixel_size);
+		
+		$self->zoom($w_offset, $h_offset, $pixel_size, 1);
 	    };
 	    /select/ && do {
 
-		# compute $self->{selection} in world coordinates
-		@{$self->{selection}} = (min($wbegin[0],$wend[0]),min($wbegin[1],$wend[1]),
-					 max($wbegin[0],$wend[0]),max($wbegin[1],$wend[1]));
-
-		$self->draw_selection;
-		
+		my $layer = $self->selected_layer();
+		if ($layer) {
+		    $layer->select() unless $self->{_control_down};
+		    delete $self->{selection};
+		    if ($click) {
+			my $point = new Geo::OGR::Geometry($Geo::OGR::wkbPoint);
+			$point->ACQUIRE;
+			$point->AddPoint($wbegin[0], $wbegin[1]);
+			$self->{selection} = $point;
+			$layer->select(that_contain => $point);
+			my $f = $layer->selected_features();
+			my @f, values(%$f);
+		    } elsif (/rect/) {
+			my @rect = (min($wbegin[0], $wend[0]), min($wbegin[1], $wend[1]),
+				    max($wbegin[0], $wend[0]), max($wbegin[1], $wend[1]));
+			my $rect = new Geo::OGR::Geometry($Geo::OGR::wkbPolygon);
+			$rect->ACQUIRE;
+			my $r = new Geo::OGR::Geometry($Geo::OGR::wkbLinearRing);
+			$r->AddPoint($rect[0], $rect[1]);
+			$r->AddPoint($rect[0], $rect[3]);
+			$r->AddPoint($rect[2], $rect[3]);
+			$r->AddPoint($rect[2], $rect[1]);
+			$rect->AddGeometry($r);
+			$rect->CloseRings;
+			$self->{selection} = $rect;
+			$layer->select($self->{_selecting} => $rect);
+		    }
+		    $self->signal_emit('features_selected');
+		    $self->draw_selection;
+		}
 	    }
 	}
-	delete $self->{rubberband_begin};
+	$self->delete_rubberband;
 
 	$self->event_handler($event);
+
+    } elsif ($self->{rubberbanding} =~ /path/ or $self->{rubberbanding} =~ /polygon/) {
+
+	#$handled = 1;
 
     } else {
 
 	$self->event_handler($event);
     }
-
+    return $handled;
 }
 
 sub motion_notify {
-    my(undef,$event,$self) = @_;
+    my(undef, $event, $self) = @_;
 
-    return unless $self->{layers} and @{$self->{layers}};
+    return 0 unless $self->{layers} and @{$self->{layers}};
 
-    @{$self->{event_coordinates}} = ($event->x,$event->y);
+    @{$self->{event_coordinates}} = ($event->x, $event->y);
 
-    if ($self->{rubberbanding} and $self->{rubberband_begin}) {
+    my $handled = 0;
+    if ($self->{rubberbanding} and $self->{rubberband}) {
 
+	my $pm = $self->{pixmap};
+	my @rb = @{$self->{rubberband}};
+	my $rgc = $self->{rubberband_gc};
 	my @end = @{$self->{event_coordinates}};
-
-	$end[0] -= $self->{w_offset};
-	$end[1] -= $self->{h_offset};
+	my @begin;
+	my ($w, $h);
+	if ($self->{rubberband_begin}) {
+	    @begin = @{$self->{rubberband_begin}};
+	    $w = $end[0] - $begin[0];
+	    $h = $end[1] - $begin[1];
+	}
 
 	# erase & draw
 
 	for ($self->{rubberbanding}) {
-	    /line/ && do { 
-#		$self->{pixmap}->draw_line($self->{rubberband_gc},@{$self->{rubberband}}) if @{$self->{rubberband}};
-		@{$self->{rubberband}} = (@{$self->{rubberband_begin}},@end);
-#		$self->{pixmap}->draw_line($self->{rubberband_gc},@{$self->{rubberband}}); 
-
-		my $x = $end[0] - $self->{rubberband_begin}->[0];
-		my $y = $end[1] - $self->{rubberband_begin}->[1];
-		my $gc = new Gtk2::Gdk::GC $self->{pixmap};
-		$self->{pixmap}->draw_rectangle($gc,1,0,0,@{$self->{viewport_size}});
-		$self->{pixmap}->draw_pixbuf($gc,$self->{pixbuf},0,0,$x,$y,-1,-1,'GDK_RGB_DITHER_NONE',0,0);
-		
+	    /line/ && do {
+		if (/pan/) {
+		    my $gc = new Gtk2::Gdk::GC $pm;
+		    $pm->draw_rectangle($gc, 1, 0, 0, @{$self->{viewport_size}});
+		    $pm->draw_pixbuf($gc, $self->{pixbuf}, 0, 0, $w, $h, -1, -1, 'GDK_RGB_DITHER_NONE', 0, 0);
+		} else {
+		    $pm->draw_line($rgc, @rb) if @rb;
+		    @rb = (@begin, @end);
+		    $pm->draw_line($rgc, @rb);
+		}
+	    };
+	    /path/ && do {
+		my @p = @{$self->{path}}; 
+		for my $p (0..$#p-1) {
+		    $pm->draw_line($rgc, @{$p[$p]}, @{$p[$p+1]});
+		}
+		$pm->draw_line($rgc, @rb) if @rb;
+		@rb = (@{$p[$#p]}, @end);
+		for my $p (0..$#p-1) {
+		    $pm->draw_line($rgc, @{$p[$p]}, @{$p[$p+1]});
+		}
+		$pm->draw_line($rgc, @rb);
 	    };
 	    /rect/ && do {
-		$self->{pixmap}->draw_rectangle($self->{rubberband_gc},FALSE,@{$self->{rubberband}}) if @{$self->{rubberband}};
-		my $w = $end[0] - $self->{rubberband_begin}->[0];
-		my $h = $end[1] - $self->{rubberband_begin}->[1];
-		if ($w > 0 and $h > 0) {
-		    @{$self->{rubberband}} = (@{$self->{rubberband_begin}},$w,$h);
-		    $self->{pixmap}->draw_rectangle($self->{rubberband_gc},FALSE,@{$self->{rubberband}});
-		} else {
-		    $self->{rubberband} = [];
-		}
+		$pm->draw_rectangle($rgc, FALSE, @rb) if @rb;
+		@rb = (min($begin[0], $end[0]), min($begin[1], $end[1]), abs($w), abs($h));
+		$pm->draw_rectangle($rgc, FALSE, @rb);
 	    };
-	    /circle/ && do {
-		$self->{pixmap}->draw_arc($self->{rubberband_gc},FALSE,@{$self->{rubberband}},0,360) if @{$self->{rubberband}};
-		my $w = $end[0] - $self->{rubberband_begin}->[0];
-		my $h = $end[1] - $self->{rubberband_begin}->[1];
-		if ($w > 0 and $h > 0) {
-		    @{$self->{rubberband}} = (@{$self->{rubberband_begin}},$w,$h);
-		    $self->{pixmap}->draw_arc($self->{rubberband_gc},FALSE,@{$self->{rubberband}},0,360);
-		} else {
-		    $self->{rubberband} = [];
-		}
+	    /ellipse/ && do {
+		$pm->draw_arc($rgc, FALSE, @rb, 0, 64*360) if @rb;
+		my $a = abs(floor($w * sqrt(2)));
+		my $b = abs(floor($h * sqrt(2)));
+		@rb = ($begin[0] - $a, $begin[1] - $b, 2*$a, 2*$b);
+		$pm->draw_arc($rgc, FALSE, @rb, 0, 64*360);
 	    };
+	    /polygon/ && do {
+		my @p = @{$self->{path}};
+		my @points;
+		for my $p (@p) {
+		    push @points, @$p;
+		}
+		push @points, @rb if @rb;
+		$pm->draw_polygon($rgc, 1, @points);
+		@rb = @end;
+		pop @points;
+		pop @points;
+		push @points, @rb;
+		$pm->draw_polygon($rgc, 1, @points);
+	    }
 	}
+
+	@{$self->{rubberband}} = @rb;
 	
-	$self->{image}->set_from_pixmap($self->{pixmap},undef);
+	$self->{image}->set_from_pixbuf(undef);
+	$self->{image}->set_from_pixmap($pm, undef);
+	$handled = 1;
     }
     
     $self->event_handler($event);
+    return $handled;
+}
+
+sub rubberband_value {
+    my($self) = @_;
+
+    if ($self->{rubberbanding} and $self->{rubberband}) {
+
+	my @p0 = $self->event_pixel2point(@{$self->{rubberband_begin}}) if $self->{rubberband_begin};
+	my @p1 = $self->event_pixel2point(@{$self->{event_coordinates}});
+
+	for ($self->{rubberbanding}) {
+	    /line/ && do {
+		return sprintf("length = %.4f", sqrt(($p1[0]-$p0[0])**2+($p1[1]-$p0[1])**2));
+	    };
+	    /path/ && do {
+		my @p = @{$self->{path}}; 
+		my $l = 0;
+		@p0 = @{$p[0]};
+		for my $i (1..$#p) {
+		    $l += sqrt(($p[$i]->[0] - $p0[0])**2+($p[$i]->[1] - $p0[1])**2);
+		    @p0 = @{$p[$i]};
+		}
+		$l += sqrt(($p1[0]-$p0[0])**2+($p1[1]-$p0[1])**2);
+		return sprintf("length = %.4f", $l);
+	    };
+	    /rect/ && do {
+		return sprintf("area = %.4f", abs(($p1[0]-$p0[0])*($p1[1]-$p0[1])));
+	    };
+	    /ellipse/ && do {
+		my $a = ($p1[0]-$p0[0]) * sqrt(2);
+		my $b = ($p1[1]-$p0[1]) * sqrt(2);
+		return sprintf("area = %.4f", abs(3.14159266*$a*$b));
+	    };
+	    /polygon/ && do {
+		my @p = @{$self->{path}};
+		my @points;
+		for my $p (@p) {
+		    push @points, [$self->event_pixel2point(@$p)];
+		}
+		push @points, [@p1];
+		push @points, [@{$points[0]}];
+		my @edges;
+		for my $i (0..$#points-1) {
+		    push @edges, [$points[$i], $points[$i+1]];
+		}
+		# test for simplicity
+		my $simple = 1;
+		for my $i (0..$#edges) {
+		    for my $j ($i+2..$#edges) {
+			next if $i == 0 and $j == $#edges;
+			$simple = 0 if intersect($edges[$i], $edges[$j]);
+			last unless $simple;
+		    }
+		    last unless $simple;
+		}
+		return "not a simple polygon" unless $simple;
+		
+		pop @points; # remove the duplicate
+
+		@points = reverse @points unless ccw_simple_polygon(\@points) == 1;
+		
+		my $area = 0;
+		my $j = 0;
+		for my $i (0..$#points) {
+		    $j++;
+		    $j = 0 if $j > $#points;
+		    $area += $points[$i]->[0] * $points[$j]->[1];
+		}
+		$j = 0;
+		for my $i (0..$#points) {
+		    $j++;
+		    $j = 0 if $j > $#points;
+		    $area -= $points[$i]->[1] * $points[$j]->[0];
+		}
+		return sprintf("area = %.4f", $area/2);
+	    };
+	}
+    }
+    return '';
+}
+
+sub ccw {
+    my($p0, $p1, $p2) = @_;
+    my $dx1 = $p1->[0] - $p0->[0]; my $dy1 = $p1->[1] - $p0->[1];
+    my $dx2 = $p2->[0] - $p0->[0]; my $dy2 = $p2->[1] - $p0->[1];
+    return 1 if $dx1*$dy2 > $dy1*$dx2;
+    return -1 if $dx1*$dy2 < $dy1*$dx2;
+    return -1 if (($dx1*$dx2 < 0) or ($dy1*$dy2 < 0));
+    return +1 if (($dx1*$dx1+$dy1*$dy1) < ($dx2*$dx2+$dy2*$dy2));
+    return 0;
+}
+
+sub intersect {
+    my($l1, $l2) = @_;
+    return ((ccw($l1->[0], $l1->[1], $l2->[0])
+	     *ccw($l1->[0], $l1->[1], $l2->[1])) <= 0)
+	&& ((ccw($l2->[0], $l2->[1], $l1->[0])
+	     *ccw($l2->[0], $l2->[1], $l1->[1])) <= 0);
+}
+
+sub ccw_simple_polygon {
+    my($points) = @_;
+    # find the northernmost point
+    my $t = 0;
+    return 0 if @$points < 3;
+    for my $i (1..$#$points) {
+	$t = $i if $points->[$i][1] > $points->[$t][1];
+    }
+    my $p = $t-1;
+    $p = $#$points if $p < 0;
+    my $n = $t+1;
+    $n = 0 if $n > $#$points;
+    return ccw($points->[$p], $points->[$t], $points->[$n]);
 }
 
 =pod
@@ -917,32 +1380,28 @@ coordinates
 
 # from event coordinates to world coordinates
 sub event_pixel2point {
-    my($self,@pixel) = @_;
+    my($self, @pixel) = @_;
     return unless $self->{layers} and @{$self->{layers}};
     @pixel = @{$self->{event_coordinates}} unless @pixel;
-    return ($self->{minX} + $self->{pixel_size} * ($pixel[0]+0.5),
-	    $self->{maxY} - $self->{pixel_size} * ($pixel[1]+0.5));
+    return ($self->{minX} + $self->{pixel_size} * ($self->{offset}[0] + $pixel[0] + 0.5),
+	    $self->{maxY} - $self->{pixel_size} * ($self->{offset}[1] + $pixel[1] + 0.5));
 }
 
 # from world coordinates to the coordinates of the drawable
 sub point2pixmap_pixel {
-    my($self,@p) = @_;
-    return (round(($p[0] - $self->{minX})/$self->{pixel_size} - 0.5 - $self->{w_offset}),
-	    round(($self->{maxY} - $p[1])/$self->{pixel_size} - 0.5 - $self->{h_offset}));
+    my($self, @p) = @_;
+    return (round(($p[0] - $self->{minX})/$self->{pixel_size} - 0.5 - $self->{offset}[0]),
+	    round(($self->{maxY} - $p[1])/$self->{pixel_size} - 0.5 - $self->{offset}[1]));
 }
 
 sub event_handler {
-    my($self,$event) = @_;
+    my($self, $event) = @_;
     return unless $self->{event_handler};
-    my @xy = $self->event_pixel2point if $self->{event_coordinates};
-    my @xy_begin;
-    if ($self->{rubberband_begin}) {
-	@xy_begin = @{$self->{rubberband_begin}};
-	$xy_begin[0] += $self->{w_offset};
-	$xy_begin[1] += $self->{h_offset};	
-	@xy_begin = $self->event_pixel2point(@xy_begin);
-    }
-    $self->{event_handler}->($self->{event_handler_user_param},$event,@xy,@xy_begin);
+    my @xy 
+	= $self->event_pixel2point if $self->{event_coordinates};
+    my @xy0 
+	= $self->event_pixel2point(@{$self->{rubberband_begin}}) if $self->{rubberband_begin};
+    $self->{event_handler}->($self->{event_handler_user_param}, $event, @xy, @xy0);
 }
 
 sub min {
