@@ -7,6 +7,8 @@ use POSIX;
 use Carp;
 use Glib qw/TRUE FALSE/;
 
+our $VERSION = '0.51';
+
 =pod
 
 =head1 NAME

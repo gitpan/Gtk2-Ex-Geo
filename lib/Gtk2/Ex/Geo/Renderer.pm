@@ -6,6 +6,8 @@ use strict;
 use warnings;
 use Carp;
 
+our $VERSION = '0.51';
+
 BEGIN {
     use Exporter "import";
     our @EXPORT = qw();
