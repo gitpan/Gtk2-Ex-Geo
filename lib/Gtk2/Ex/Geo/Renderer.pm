@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Carp;
 
-our $VERSION = '0.51';
+our $VERSION = '0.52';
 
 BEGIN {
     use Exporter "import";
@@ -15,13 +15,9 @@ BEGIN {
     our %EXPORT_TAGS = ( FIELDS => [ @EXPORT_OK, @EXPORT ] );
 }
 
-require DynaLoader;
+our @ISA = qw(Exporter Gtk2::Gdk::Pixbuf);
 
-our @ISA = qw(Exporter DynaLoader Gtk2::Gdk::Pixbuf);
-
-sub dl_load_flags {0x01}
-
-bootstrap Gtk2::Ex::Geo::Renderer;
+#sub dl_load_flags {0x01}
 
 # Preloaded methods go here.
 
@@ -97,7 +93,7 @@ sub new {
 					     $pixel_size, 
 					     $bg_r, $bg_g, $bg_b, 255);
 
-    my $surface = cairo_surface_from_pb($pb);
+    my $surface = &Gtk2::Ex::Geo::cairo_surface_from_pb($pb);
     my $cr = Cairo::Context->create($surface);
 
     for my $layer (@$layers) {
@@ -107,7 +103,7 @@ sub new {
     undef $cr;
     undef $surface;
     
-    my $self = gdk_pixbuf_new_from_data($pb);
+    my $self = &Gtk2::Ex::Geo::gdk_pixbuf_new_from_data($pb);
 
     &Geo::Raster::ral_pixbuf_destroy($pb); # does not delete the real pixbuf
 

@@ -35,8 +35,9 @@ use Gtk2::Ex::Geo::Raster;
 use Gtk2::Ex::Geo::Vector;
 
 require Exporter;
+require DynaLoader;
 
-our @ISA = qw(Exporter);
+our @ISA = qw(Exporter DynaLoader);
 
 our %EXPORT_TAGS = ( 'all' => [ qw(
 	
@@ -48,7 +49,9 @@ our @EXPORT = qw(
 	
 );
 
-our $VERSION = '0.52';
+our $VERSION = '0.53';
+
+bootstrap Gtk2::Ex::Geo;
 
 1;
 __END__

@@ -3,11 +3,12 @@
 package Gtk2::Ex::Geo::Overlay;
 
 use strict;
+use UNIVERSAL qw(isa);
 use POSIX;
 use Carp;
 use Glib qw/TRUE FALSE/;
 
-our $VERSION = '0.51';
+our $VERSION = '0.52';
 
 =pod
 
@@ -523,10 +524,7 @@ sub zoom_to_all {
     return unless $self->{layers} and @{$self->{layers}};
     my @size;
     for my $layer (@{$self->{layers}}) {
-	my @s;
-	if (ref($layer) eq 'Geo::Raster' or ref($layer) eq 'Geo::Vector') {
-	    @s = $layer->world(of_GDAL=>1);
-	}
+	my @s = $layer->world(of_GDAL=>1);
 	if (@size) {
 	    $size[0] = min($size[0], $s[0]);
 	    $size[1] = min($size[1], $s[1]);

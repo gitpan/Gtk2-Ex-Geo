@@ -51,17 +51,17 @@ for $package ('gdal','gdk-pixbuf-2.0','libral') {
 our $deps = ExtUtils::Depends->new('Gtk2::Ex::Geo','Geo::Raster','Gtk2');
 
 our %pm_files = (
-		 'lib/Gtk2/Ex/Geo/Renderer.pm'     => '$(INST_LIBDIR)/Renderer.pm',
-		 'lib/Gtk2/Ex/Geo/Overlay.pm'      => '$(INST_LIBDIR)/Overlay.pm',
-		 'lib/Gtk2/Ex/Geo/Glue.pm'         => '$(INST_LIBDIR)/Glue.pm',
-		 'lib/Gtk2/Ex/Geo/TreeDumper.pm'   => '$(INST_LIBDIR)/TreeDumper.pm',
-		 'lib/Gtk2/Ex/Geo/DialogMaster.pm' => '$(INST_LIBDIR)/DialogMaster.pm',
-		 'lib/Gtk2/Ex/Geo/OGRDialog.pm'    => '$(INST_LIBDIR)/OGRDialog.pm',
-		 'lib/Gtk2/Ex/Geo/GDALDialog.pm'   => '$(INST_LIBDIR)/GDALDialog.pm',
-		 'lib/Gtk2/Ex/Geo/Layer.pm'        => '$(INST_LIBDIR)/Layer.pm',
-		 'lib/Gtk2/Ex/Geo/Raster.pm'       => '$(INST_LIBDIR)/Raster.pm',
-		 'lib/Gtk2/Ex/Geo/Vector.pm'       => '$(INST_LIBDIR)/Vector.pm',
-		 'lib/Gtk2/Ex/Geo.pm'              => '$(INST_LIBDIR)/../Geo.pm',
+		 'lib/Gtk2/Ex/Geo/Renderer.pm'     => '$(INST_LIBDIR)/Geo/Renderer.pm',
+		 'lib/Gtk2/Ex/Geo/Overlay.pm'      => '$(INST_LIBDIR)/Geo/Overlay.pm',
+		 'lib/Gtk2/Ex/Geo/Glue.pm'         => '$(INST_LIBDIR)/Geo/Glue.pm',
+		 'lib/Gtk2/Ex/Geo/TreeDumper.pm'   => '$(INST_LIBDIR)/Geo/TreeDumper.pm',
+		 'lib/Gtk2/Ex/Geo/DialogMaster.pm' => '$(INST_LIBDIR)/Geo/DialogMaster.pm',
+		 'lib/Gtk2/Ex/Geo/OGRDialog.pm'    => '$(INST_LIBDIR)/Geo/OGRDialog.pm',
+		 'lib/Gtk2/Ex/Geo/GDALDialog.pm'   => '$(INST_LIBDIR)/Geo/GDALDialog.pm',
+		 'lib/Gtk2/Ex/Geo/Layer.pm'        => '$(INST_LIBDIR)/Geo/Layer.pm',
+		 'lib/Gtk2/Ex/Geo/Raster.pm'       => '$(INST_LIBDIR)/Geo/Raster.pm',
+		 'lib/Gtk2/Ex/Geo/Vector.pm'       => '$(INST_LIBDIR)/Geo/Vector.pm',
+		 'lib/Gtk2/Ex/Geo.pm'              => '$(INST_LIBDIR)/Geo.pm',
 );
 
 $deps->add_pm (%pm_files);

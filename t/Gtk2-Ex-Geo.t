@@ -36,10 +36,10 @@ my $icon = $0;
 $icon =~ s/Gtk2-Ex-Geo.t/..\/Crop-Circle-5.ico/;
 $window->set_default_icon_from_file($icon) if -f $icon;
 
-my $gis = new Gtk2::Ex::Geo::Glue 
-	history => "$home.rash_history", 
-	resources => "$home.rashrc", 
-	main_window => $window;
+my $gis = Gtk2::Ex::Geo::Glue->new
+    ( history => "$home.rash_history", 
+      resources => "$home.rashrc", 
+      main_window => $window );
 
 my $vbox = Gtk2::VBox->new (FALSE, 0);
 
