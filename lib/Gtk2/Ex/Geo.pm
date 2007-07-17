@@ -1,214 +1,166 @@
-## @class Gtk2::Ex::Geo
-# @brief The module to 'use' in applications 
+## @namespace Gtk2::Ex::Geo
+# @brief a framework for building geospatial GUI toolkit
+#
+# Contains classes Gtk2::Ex::Geo::DialogMaster,
+# Gtk2::Ex::Geo::Dialogs, Gtk2::Ex::Geo::Raster
+# Gtk2::Ex::Geo::Raster::Dialogs #Gtk2::Ex::Geo::Vector
+# Gtk2::Ex::Geo::Vector::Dialogs #Gtk2::Ex::Geo::Glue
+# Gtk2::Ex::Geo::History #Gtk2::Ex::Geo::Layer
+# Gtk2::Ex::Geo::TreeDumper
+
 package Gtk2::Ex::Geo;
 
-use 5.005000;
+# @brief A widget and other classes for geospatial applications
+# @author Copyright (c) Ari Jolma
+# @author This library is free software; you can redistribute it and/or modify
+# it under the same terms as Perl itself, either Perl version 5.8.5 or,
+# at your option, any later version of Perl 5 you may have available.
+
+=pod
+
+=head1 NAME
+
+Gtk2::Ex::Geo - A widget and other classes for geospatial applications
+
+The <a href="http://map.hut.fi/doc/Geoinformatica/html/">
+documentation of Gtk2::Ex::Geo</a> is written in doxygen format.
+
+=cut
+
 use strict;
 use warnings;
-use POSIX;
-POSIX::setlocale( &POSIX::LC_NUMERIC, "C" ); # http://www.remotesensing.org/gdal/faq.html nr. 11
+use XSLoader;
 
 use Glib qw/TRUE FALSE/;
-use Gtk2::Gdk::Keysyms;
-
-# known layer types:
-use Geo::Layer qw/:all/;
-
-# these will become optional
-use Geo::Raster;
-use Geo::Vector;
+use Gtk2;
+use Gtk2::Gdk::Keysyms; # in Overlay
 
 use Gtk2::GladeXML;
 use Gtk2::Ex::Geo::DialogMaster;
 
-use Gtk2::Ex::Geo::Renderer;
-use Gtk2::Ex::Geo::Overlay;
 use Gtk2::Ex::Geo::Glue;
 
-use Gtk2::Ex::Geo::GDALDialog;
-use Gtk2::Ex::Geo::OGRDialog;
-
-use Gtk2::Ex::Geo::Layer;
-
-# these will become optional
-use Gtk2::Ex::Geo::Raster;
-use Gtk2::Ex::Geo::Vector;
-
-require Exporter;
-require DynaLoader;
-
-our @ISA = qw(Exporter DynaLoader);
-
-our %EXPORT_TAGS = ( 'all' => [ qw(
-	
-) ] );
-
-our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
-
-our @EXPORT = qw(
-	
-);
-
-our $VERSION = '0.53';
-
-bootstrap Gtk2::Ex::Geo;
-
-1;
-__END__
-
-=head1 NAME
-
-Gtk2::Ex::Geo - Perl Gtk2 widgets for GIS
-
-=head1 SYNOPSIS
-
-# the order of these is important:
-use Gtk2::Ex::Geo;
-use Glib qw/TRUE FALSE/;
-use Gtk2 '-init';
-
-my $gis = Gtk2::Ex::Geo::Glue->new( history=>[''] );
-
-$gis->set_event_handler( \&info );
-$gis->{overlay}->{rubberbanding} = 'zoom rect';
-
-# the widgets already created and in $gis 
-# have to be declared as Custom widgets
-# they are installed through this custom_handler
-
-sub get_custom_widget {
-    my $name = $_[2];
-    if ($name eq 'layer_widget') {
-	return $gis->{tree_view};
-    } elsif ($name eq 'map_widget') {
-	return $gis->{overlay};
-    }
+BEGIN {
+    use Exporter "import";
+    our @ISA = qw(Exporter);
+    our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
+    our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
+    our @EXPORT = qw( );
+    our $VERSION = '0.54';
+    XSLoader::load( 'Gtk2::Ex::Geo', $VERSION );
 }
 
-Gtk2::Glade->set_custom_handler(\&get_custom_widget);
+## @cmethod list simple(%params)
+# @brief Construct a simple GIS
+#
+# @param params named parameters:
+# - <i>registrations</i> an anonymous list of class registrations for a Glue object
+# @return a list of window and a Glue object
 
-$glade = Gtk2::GladeXML->new("gui.glade");
-$glade->signal_autoconnect_from_package('main');
+sub simple{
+    my %params = @_;
+    my $home = Gtk2::Ex::Geo::homedir();
 
-$glade->get_widget('map_widget')->show_all;
-$glade->get_widget('layer_widget')->show;
+    my $window = Gtk2::Window->new;
+    
+    $params{title} = 'Geoinformatica' unless $params{title};
+    $window->set_title($params{title});
 
-Gtk2->main;
+    $window->set_default_icon_from_file($params{icon}) if $params{icon} and -f $params{icon};
+    
+    my $gis = Gtk2::Ex::Geo::Glue->new
+	( 
+	  history => "$home.rash_history", 
+	  resources => "$home.rashrc", 
+	  main_window => $window
+	  );
 
-=head1 LAYERS
+    if ($params{registrations}) {
+	for (@{$params{registrations}}) {
+	    $gis->register_class(%{$_});
+	}
+    }
+    
+    my $vbox = Gtk2::VBox->new (FALSE, 0);
+    
+    $vbox->pack_start ($gis->{toolbar}, FALSE, FALSE, 0);
+    
+    my $hbox = Gtk2::HBox->new (FALSE, 0);
+    
+    $hbox->pack_start ($gis->{tree_view}, FALSE, FALSE, 0);
+    $hbox->pack_start ($gis->{overlay}, TRUE, TRUE, 0);
+    
+    $vbox->add ($hbox);
+    
+    $vbox->pack_start ($gis->{entry}, FALSE, FALSE, 0);
+    $vbox->pack_start ($gis->{statusbar}, FALSE, FALSE, 0);
 
-What is expected of a layer by Gtk2::Ex::Geo?
+    $window->add ($vbox);
+    
+    $window->signal_connect("destroy", \&close_the_app, [$window, $gis]);
 
-=head2 Properties
+    $window->set_default_size(600,600);
+    $window->show_all;
+    
+    return ($window, $gis);
+}
 
-=over
+## @ignore
+sub exception_handler {
+    
+    if ($_[0] =~ /\@INC contains/) {
+	$_[0] =~ s/\(\@INC contains.*?\)//;
+    }
+    my $dialog = Gtk2::MessageDialog->new(undef,'destroy-with-parent','info','close',$_[0]);
+    $dialog->signal_connect(response => \&destroy_dialog);
+    $dialog->show_all;
+    
+    return 1;
+}
 
-=item name 
+## @ignore
+sub destroy_dialog {
+    my($dialog) = @_;
+    $dialog->destroy;
+}
 
-string (Gtk2::Ex::Geo takes care)
+## @ignore
+sub close_the_app {
+    my($window, $gis) = @{$_[1]};
+    $gis->close();
+    Gtk2->main_quit;
+    exit(0);
+}
 
-=item hidden 
+## @ignore
+sub homedir {
 
-boolean (Gtk2::Ex::Geo takes care)
+    require Config;
+    my $OS = $Config::Config{'osname'};
 
-=item alpha 
+    if ($OS eq 'MSWin32') {
 
-0..255 (Gtk2::Ex::Geo takes care)
+	require Win32::Registry;
+    
+	my $Register = "Volatile Environment";
+	my $hkey = $::HKEY_CURRENT_USER; # assignment is just to get rid of a "used only once" warning
+    
+	$::HKEY_CURRENT_USER->Open($Register,$hkey);
+    
+	my %values;
 
-=item ogr_layer 
+	$hkey->GetValues(\%values);
+    
+	$hkey->Close;
 
-(for dialogs, todo: change to simple layer)
+	return "$values{HOMEDRIVE}->[2]$values{HOMEPATH}->[2]\\";
 
-=item iterator 
+    } else {
 
-(Gtk2::Ex::Geo takes care)
+	return "$ENV{HOME}/";
 
-=back
+    }
 
-=head2 Methods
+}
 
-=over
-
-=item world(1) 
-
-returns (minX,minY,maxX,maxY)
-
-todo: context menu returns an array
-
-=item nodata_value(nodata_value) 
-
-set or get
-
-=item rasterize() 
-
-(context menu command)
-
-
-=item cache() 
-
-(context menu command)
-
-=back
-
-todo: type_for_user (for the GUI)
-todo: alpha_for_user (for the GUI)
-
-=head1 SEE ALSO
-
-=over
-
-=item Gtk2::Ex::Geo::Glue 
-
-Module for glueing widgets into a GIS.
-
-=item Gtk2::Ex::Geo::Overlay 
-
-A Gtk2 widget for a visual overlay of geospatial data.
-
-=item Gtk2::Ex::Geo::Renderer
-
-A Gtk2::Gdk::Pixbuf made from spatial data
-
-=item Geo::Raster
-
-Perl extension for raster algebra
-
-=item Geo::Vector
-
-Perl extension for geospatial vectors
-
-=item Gtk2::Ex::Geo::Composite
-
-A set of geospatial layers visualized together
-
-=item Gtk2::Ex::Geo::TemporalRaster
-
-A raster timeseries 
-
-=item Gtk2::Ex::Geo::GDALDialog
-
-Dialogs for raster (gdal) layers
-
-=item Gtk2::Ex::Geo::OGRDialog
-
-Dialogs for vector (ogr) layers
-
-=back
-
-This module should be discussed in geo-perl@list.hut.fi.
-
-The homepage of this module is http://libral.sf.net.
-
-=head1 AUTHOR
-
-Ari Jolma, E<lt>ari.jolma _at_ tkk.fiE<gt>
-
-=head1 COPYRIGHT AND LICENSE
-
-Copyright (C) 2005 by Ari Jolma
-
-This library is free software; you can redistribute it and/or modify
-it under the same terms as Perl itself, either Perl version 5.8.5 or,
-at your option, any later version of Perl 5 you may have available.
-
-=cut
+1;

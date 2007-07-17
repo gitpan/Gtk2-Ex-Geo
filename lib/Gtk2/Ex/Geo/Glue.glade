@@ -3,7 +3,7 @@
 
 <glade-interface>
 
-<widget class="GtkDialog" id="dialog1">
+<widget class="GtkDialog" id="inspect_dialog">
   <property name="width_request">250</property>
   <property name="height_request">400</property>
   <property name="title" translatable="yes">dialog1</property>
@@ -33,7 +33,7 @@
 	  <property name="layout_style">GTK_BUTTONBOX_END</property>
 
 	  <child>
-	    <widget class="GtkButton" id="closebutton1">
+	    <widget class="GtkButton" id="inspect_close_button">
 	      <property name="visible">True</property>
 	      <property name="can_default">True</property>
 	      <property name="can_focus">True</property>
@@ -54,7 +54,7 @@
       </child>
 
       <child>
-	<widget class="GtkScrolledWindow" id="scrolledwindow2">
+	<widget class="GtkScrolledWindow" id="inspect_scrolledwindow">
 	  <property name="visible">True</property>
 	  <property name="can_focus">True</property>
 	  <property name="hscrollbar_policy">GTK_POLICY_ALWAYS</property>

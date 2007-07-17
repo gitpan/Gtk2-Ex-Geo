@@ -6,14 +6,16 @@ my %missing_modules;
 $missing_modules{chk_module('ExtUtils::MakeMaker')} = 1;
 $missing_modules{chk_module('ExtUtils::Depends')} = 1;
 $missing_modules{chk_module('ExtUtils::PkgConfig')} = 1;
-$missing_modules{chk_module('Geo::Raster')} = 1;
-$missing_modules{chk_module('Geo::Vector')} = 1;
 $missing_modules{chk_module('Gtk2::GladeXML')} = 1;
 $missing_modules{chk_module('Data::TreeDumper')} = 1;
+$missing_modules{chk_module('Graphics::ColorUtils')} = 1;
+$missing_modules{chk_module('Geo::OGC::Geometry')} = 1;
 delete $missing_modules{''};
 
+my $have_libral = 1;
+
 my @missing_modules = keys %missing_modules;
-die "Following required modules are missing: @missing_modules\n" if @missing_modules;
+warn "Following required modules are missing: @missing_modules\n" if @missing_modules;
 
 use ExtUtils::MakeMaker;
 use ExtUtils::Depends;
@@ -21,7 +23,10 @@ use ExtUtils::PkgConfig;
 
 my($inc,$libs,$cflags) = ('','','');
 
-for $package ('gdal','gdk-pixbuf-2.0','libral') {
+my @packages = ('gdk-pixbuf-2.0');
+push @packages, ('gdal', 'libral') if $have_libral;
+
+for $package (@packages) {
     print "Checking for $package: ";
     my($c,$l);
     if ($package eq 'gdal' and $^O ne 'MSWin32') {
@@ -48,19 +53,15 @@ for $package ('gdal','gdk-pixbuf-2.0','libral') {
     print "ok\n";
 }
 
-our $deps = ExtUtils::Depends->new('Gtk2::Ex::Geo','Geo::Raster','Gtk2');
+our $deps = ExtUtils::Depends->new('Gtk2::Ex::Geo', 'Gtk2');
 
 our %pm_files = (
-		 'lib/Gtk2/Ex/Geo/Renderer.pm'     => '$(INST_LIBDIR)/Geo/Renderer.pm',
 		 'lib/Gtk2/Ex/Geo/Overlay.pm'      => '$(INST_LIBDIR)/Geo/Overlay.pm',
 		 'lib/Gtk2/Ex/Geo/Glue.pm'         => '$(INST_LIBDIR)/Geo/Glue.pm',
 		 'lib/Gtk2/Ex/Geo/TreeDumper.pm'   => '$(INST_LIBDIR)/Geo/TreeDumper.pm',
 		 'lib/Gtk2/Ex/Geo/DialogMaster.pm' => '$(INST_LIBDIR)/Geo/DialogMaster.pm',
-		 'lib/Gtk2/Ex/Geo/OGRDialog.pm'    => '$(INST_LIBDIR)/Geo/OGRDialog.pm',
-		 'lib/Gtk2/Ex/Geo/GDALDialog.pm'   => '$(INST_LIBDIR)/Geo/GDALDialog.pm',
 		 'lib/Gtk2/Ex/Geo/Layer.pm'        => '$(INST_LIBDIR)/Geo/Layer.pm',
-		 'lib/Gtk2/Ex/Geo/Raster.pm'       => '$(INST_LIBDIR)/Geo/Raster.pm',
-		 'lib/Gtk2/Ex/Geo/Vector.pm'       => '$(INST_LIBDIR)/Geo/Vector.pm',
+		 'lib/Gtk2/Ex/Geo/Dialogs.pm'      => '$(INST_LIBDIR)/Geo/Dialogs.pm',
 		 'lib/Gtk2/Ex/Geo.pm'              => '$(INST_LIBDIR)/Geo.pm',
 );
 
@@ -81,6 +82,8 @@ if ($^O eq 'MSWin32') {
 
 $deps->save_config ('Files.pm');
 
+my $define = $have_libral ? '-DHAVE_RAL' : '';
+
 WriteMakefile(
 	      NAME              => 'Gtk2::Ex::Geo',
 	      VERSION_FROM      => 'lib/Gtk2/Ex/Geo.pm',
@@ -93,6 +96,7 @@ WriteMakefile(
 		) : 
 	       ()
 	       ),
+	      DEFINE => $define,
 	      CCFLAGS => $cflags,
 	      $deps->get_makefile_vars,
 	      @for_windows
@@ -128,7 +132,7 @@ sub postamble {
     my $ret = '';
     my $lib = 'lib/Gtk2/Ex/Geo/';
     $lib = "lib/Gtk2/Ex/Geo/";
-    for ('Glue','GDALDialog','OGRDialog') {
+    for ('Glue', 'Dialogs') {
 	$ret .= "\n$lib$_.pm: $lib$_.pm.in $lib$_.glade\n";
 	if ($^O eq 'MSWin32') {
 	} else {

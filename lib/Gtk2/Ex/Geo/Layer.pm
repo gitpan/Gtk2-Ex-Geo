@@ -1,29 +1,44 @@
 ## @class Gtk2::Ex::Geo::Layer
 # @brief A root class for visual geospatial layers
+# @author Copyright (c) Ari Jolma
+# @author This library is free software; you can redistribute it and/or modify
+# it under the same terms as Perl itself, either Perl version 5.8.5 or,
+# at your option, any later version of Perl 5 you may have available.
 package Gtk2::Ex::Geo::Layer;
+
+=pod
+
+=head1 NAME
+
+Gtk2::Ex::Geo::Layer - A root class for visual geospatial layers
+
+The <a href="http://map.hut.fi/doc/Geoinformatica/html/">
+documentation of Gtk2::Ex::Geo</a> is written in doxygen format.
+
+=cut
 
 use strict;
 use warnings;
-use POSIX;
-POSIX::setlocale( &POSIX::LC_NUMERIC, "C" ); # http://www.remotesensing.org/gdal/faq.html nr. 11
 use Carp;
+use FileHandle;
+use Glib qw /TRUE FALSE/;
+use Graphics::ColorUtils qw /:all/;
+use Gtk2::Ex::Geo::Dialogs;
 
-use vars qw/$MAX_INT $MAX_REAL $color_cell_size %PALETTE_TYPE %SYMBOL_TYPE %LABEL_PLACEMENT/;
+use vars qw/$MAX_INT $MAX_REAL $COLOR_CELL_SIZE %PALETTE_TYPE %SYMBOL_TYPE %LABEL_PLACEMENT/;
 
-require Exporter;
-
-our @ISA = qw(Exporter Geo::Layer);
-
-our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
-
-our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
-
-our @EXPORT = qw();
+BEGIN {
+    use Exporter "import";
+    our %EXPORT_TAGS = ( 'all' => [ qw(%PALETTE_TYPE %SYMBOL_TYPE %LABEL_PLACEMENT) ] );
+    our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
+}
 
 $MAX_INT = 999999;
 $MAX_REAL = 999999999.99;
 
-$color_cell_size = 20;
+$COLOR_CELL_SIZE = 20;
+
+# the integer values are the same as in libral visualization code:
 
 %PALETTE_TYPE = ( 'Single color' => 0, 
 		  Grayscale => 1, 
@@ -54,13 +69,31 @@ $color_cell_size = 20;
 		     'Bottom right' => 8,
 		     );
 
+## @cmethod registration()
+# @brief Returns in an anonymous hash the generic dialogs and commands.
+sub registration {
+    my $dialogs = Gtk2::Ex::Geo::Dialogs->new();
+    my $commands = {
+	'zoom to all' => {
+	    nr => 1,
+	    text => 'Zoom to all',
+	    tip => 'Zoom to all layers.',
+	    pos => -1,
+	    sub => sub {
+		my(undef, $gui) = @_;
+		$gui->{overlay}->zoom_to_all;
+	    }
+	}
+    };
+    return { dialogs => $dialogs, commands => $commands };
+}
+
 ## @cmethod @palette_types()
 #
 # @brief Returns a list of valid palette types (strings).
 # @return a list of valid palette types (strings).
 sub palette_types {
-    my($class) = @_;
-    return keys %PALETTE_TYPE;
+    return sort {$PALETTE_TYPE{$a} <=> $PALETTE_TYPE{$b}} keys %PALETTE_TYPE;
 }
 
 ## @cmethod @symbol_types()
@@ -68,18 +101,33 @@ sub palette_types {
 # @brief Returns a list of valid symbol types (strings).
 # @return a list of valid symbol types (strings).
 sub symbol_types {
-    my($class) = @_;
-    return keys %SYMBOL_TYPE;
+    return sort {$SYMBOL_TYPE{$a} <=> $SYMBOL_TYPE{$b}} keys %SYMBOL_TYPE;
 }
 
+## @cmethod @label_placements()
+#
+# @brief Returns a list of valid label_placements (strings).
+# @return a list of valid label_placements (strings).
+sub label_placements {
+    return sort {$LABEL_PLACEMENT{$a} <=> $LABEL_PLACEMENT{$b}} keys %LABEL_PLACEMENT;
+}
+
+## @cmethod new(%params)
+# @brief constructs a new layer object or blesses an object into a layer class
+# Calls defaults with the given parameters.
 sub new {
     my($class, %params) = @_;
     my $self = $params{self} ? $params{self} : {};
-    defaults($self, %params);
-    return $self if $params{self};
     bless $self => (ref($class) or $class);
+    $self->defaults(%params);
+    return $self;
 }
 
+## @method defaults(%params)
+# @brief assigns default values to attributes
+# The default values are hard-coded, but they can be overridden with
+# given values.  The given values are lower case.
+# @todo: document the attributes
 sub defaults {
     my($self, %params) = @_;
 
@@ -100,8 +148,9 @@ sub defaults {
     $self->{HUE_DIR} = 1 unless exists $self->{HUE_DIR}; # from min up to max
     $self->{HUE} = -1 unless exists $self->{HUE}; # grayscale is gray scale
 
-    $self->{SINGLE_COLOR} = [255,255,255,255] unless exists $self->{SINGLE_COLOR};
+    $self->{SINGLE_COLOR} = [255, 255, 255, 255] unless exists $self->{SINGLE_COLOR};
 
+    $self->{COLOR_TABLE} = [] unless exists $self->{COLOR_TABLE};
     $self->{COLOR_BINS} = [] unless exists $self->{COLOR_BINS};
 
     # scales are used in rendering in some palette types
@@ -119,9 +168,10 @@ sub defaults {
     $self->{LABEL_COLOR} = [0, 0, 0, 255] unless exists $self->{LABEL_COLOR};
     $self->{LABEL_MIN_SIZE} = 0 unless exists $self->{LABEL_MIN_SIZE};
 
-    $self->{HAS_BORDER} = 0 unless exists $self->{HAS_BORDER};
-    $self->{BORDER_COLOR} = [0, 0, 0] unless exists $self->{BORDER_COLOR};
+    $self->{BORDER_COLOR} = [] unless exists $self->{BORDER_COLOR};
 
+    $self->{SELECTED_FEATURES} = [];
+  
     # set from input
     
     $self->{NAME} = $params{name} if exists $params{name};
@@ -129,10 +179,26 @@ sub defaults {
     $self->{VISIBLE} = $params{visible} if exists $params{visible};
     $self->{PALETTE_TYPE} = $params{palette_type} if exists $params{palette_type};
     $self->{SYMBOL_TYPE} = $params{symbol_type} if exists $params{symbol_type};
-    $self->{SINGLE_COLOR} = $params{single_color} if exists $params{single_color};
+    $self->{SYMBOL_SIZE} = $params{symbol_size} if exists $params{symbol_size};
+    $self->{SYMBOL_SCALE_MIN} = $params{scale_min} if exists $params{scale_min};
+    $self->{SYMBOL_SCALE_MAX} = $params{scale_max} if exists $params{scale_max};
+    $self->{HUE_AT_MIN} = $params{hue_at_min} if exists $params{hue_at_min};
+    $self->{HUE_AT_MAX} = $params{hue_at_max} if exists $params{hue_at_max};
+    $self->{HUE_DIR} = $params{hue_dir} if exists $params{hue_dir};
+    $self->{HUE} = $params{hue} if exists $params{hue};
+    @{$self->{SINGLE_COLOR}} = @{$params{single_color}} if exists $params{single_color};
+    $self->{SINGLE_TABLE} = $params{color_table} if exists $params{color_table};
+    $self->{COLOR_BINS} = $params{color_bins} if exists $params{color_bins};
+    $self->{COLOR_SCALE_MIN} = $params{color_scale_min} if exists $params{color_scale_min};
+    $self->{COLOR_SCALE_MAX} = $params{color_scale_max} if exists $params{color_scale_max};
     $self->{COLOR_FIELD} = $params{color_field} if exists $params{color_field};
     $self->{SYMBOL_FIELD} = $params{symbol_field} if exists $params{symbol_field};
-    $self->{LABEL_FIELD} = $params{label_field} if exists $params{label_field};  
+    $self->{LABEL_FIELD} = $params{label_field} if exists $params{label_field};
+    $self->{LABEL_PLACEMENT} = $params{label_placement} if exists $params{label_placement};
+    $self->{LABEL_FONT} = $params{label_font} if exists $params{label_font};
+    @{$self->{LABEL_COLOR}} = @{$params{label_color}} if exists $params{label_color};
+    $self->{LABEL_MIN_SIZE} = $params{label_min_size} if exists $params{label_min_size};
+    @{$self->{BORDER_COLOR}} = @{$params{border_color}} if exists $params{border_color};
 
 }
 
@@ -142,6 +208,8 @@ sub DESTROY {
     $self->destroy_dialogs;
 }
 
+##@ignore
+# this should not be necessary
 sub destroy_dialogs {
     my $self = shift;
     for (keys %$self) {
@@ -194,18 +262,25 @@ sub visible {
     defined $visible ? $self->{VISIBLE} = $visible : $self->{VISIBLE};
 }
 
-sub has_border {
-    my($self, $has_border) = @_;
-    defined $has_border ?
-	$self->{HAS_BORDER} = $has_border :
-	$self->{HAS_BORDER};
-}
-
+## @method border_color($red, $green, $blue)
+# @brief Set or get the border color of the features.
+# @code
+# $self->border_color($red, $green, $blue); # set 
+# $self->border_color(); # clear, no border
+# @color = $self->border_color(); # get
+# @endcode
 sub border_color {
     my($self, @color) = @_;
-    @color ?
-	@{$self->{BORDER_COLOR}} = @color :
-	@{$self->{BORDER_COLOR}};
+    @{$self->{BORDER_COLOR}} = @color if @color;
+    return @{$self->{BORDER_COLOR}} if defined wantarray;
+    @{$self->{BORDER_COLOR}} = [] unless @color;
+}
+
+## @method inspect_data
+# @brief Return data for the inspect window.
+sub inspect_data {
+    my $self = shift;
+    return $self;
 }
 
 ## @method void properties_dialog(Gtk2::Ex::Glue gui)
@@ -214,72 +289,89 @@ sub border_color {
 # @param gui A Gtk2::Ex::Glue object (contains predefined dialogs).
 sub properties_dialog {
     my($self, $gui) = @_;
+    croak("no properties dialog defined for class ".ref($self));
 }
 
-## @method void symbols_dialog(Gtk2::Ex::Glue gui)
-#
-# @brief A request to invoke the symbols dialog for this layer object.
+## @method void open_features_dialog(Gtk2::Ex::Glue gui)
+# 
+# @brief A request to invoke a features dialog for this layer object.
 # @param gui A Gtk2::Ex::Glue object (contains predefined dialogs).
-sub symbols_dialog {
+sub open_features_dialog {
     my($self, $gui) = @_;
-    $self->open_symbols_dialog($gui);
+    croak("no features dialog defined for class ".ref($self));
 }
 
-## @method void colors_dialog(Gtk2::Ex::Glue gui)
-#
-# @brief A request to invoke the colors dialog for this layer object.
+## @method void features_selected(Gtk2::Ex::Glue gui)
+# 
+# @brief The user has made a selection in the overlay
 # @param gui A Gtk2::Ex::Glue object (contains predefined dialogs).
-sub colors_dialog {
+sub features_selected {
     my($self, $gui) = @_;
-    $self->open_colors_dialog($gui);
 }
 
-## @method void labeling_dialog(Gtk2::Ex::Glue gui)
+## @cmethod hashref menu_items($items)
 #
-# @brief A request to invoke the labeling dialog for this layer object.
-# @param gui A Gtk2::Ex::Glue object (contains predefined dialogs).
-sub labels_dialog {
-    my($self, $gui) = @_;
-    $self->open_labels_dialog($gui);
-}
-
-## @cmethod @menu_items()
-#
-# @brief Reports the class menu items for the GUI.
-# @return Class menu items for the GUI.
+# @brief Reports the class menu items (name and sub) for the GUI.
+# @param items pre-defined menu items 
+# @return A reference to an anonymous hash.
 sub menu_items {
-    my $self = shift;
-    return ('_Deselect all');
+    my($self, $items) = @_;
+    $items->{x90} =
+    {
+	nr => 90,
+    };
+    $items->{'_Unselect all'} =
+    {
+	nr => 91,
+	sub => sub {
+	    my($self, $gui) = @{$_[1]};
+	    $self->select;
+	    $gui->{overlay}->update_image;
+	}
+    };
+    $items->{'_Symbol...'} =
+    {
+	nr => 92,
+	sub => sub {
+	    my($self, $gui) = @{$_[1]};
+	    $self->open_symbols_dialog($gui);
+	}
+    };
+    $items->{'_Colors...'} =
+    {
+	nr => 93,
+	sub => sub {
+	    my($self, $gui) = @{$_[1]};
+	    $self->open_colors_dialog($gui);
+	}
+    };
+    $items->{'_Labeling...'} =
+    {
+	nr => 94,
+	sub => sub {
+	    my($self, $gui) = @{$_[1]};
+	    $self->open_labels_dialog($gui);
+	}
+    };
+    $items->{'_Inspect...'} =
+    {
+	nr => 95,
+	sub => sub {
+	    my($self, $gui) = @{$_[1]};
+	    $gui->inspect($self->inspect_data, $self->name);
+	}
+    };
+    $items->{'_Properties...'} =
+    {
+	nr => 99,
+	sub => sub {
+	    my($self, $gui) = @{$_[1]};
+	    $self->properties_dialog($gui);
+	}
+    };
+    return $items;
 }
 
-## @method $menu_action($item, Gtk2::Ex::Glue gui)
-#
-# @brief Reports the class menu items for the GUI.
-# @param item The selected menu item.
-# @param gui A Gtk2::Ex::Glue object (contains predefined dialogs).
-# @return true if item was recognized.
-# @todo The method is not yet ready!
-sub menu_action {
-    my($self, $item, $gui) = @_;
-    if ($item eq '_Deselect all') {
-	$self->select;
-	return 1;
-    }
-    return 0;
-}
-
-## private @method _key2value()
-#
-# @brief Convert string attributes to integers for libral.
-sub _key2value {
-    my $self = shift;
-    $self->{PALETTE_VALUE} = $PALETTE_TYPE{$self->{PALETTE_TYPE}};
-    $self->{SYMBOL_VALUE} = $SYMBOL_TYPE{$self->{SYMBOL_TYPE}};
-    if ($self->{SYMBOL_FIELD} eq 'Fixed size') {
-		$self->{SYMBOL_SCALE_MIN} = 0; # similar to grayscale scale
-		$self->{SYMBOL_SCALE_MAX} = 0;
-    }
-}
 
 ## @method $palette_type($palette_type)
 #
@@ -372,18 +464,18 @@ sub symbol_scale {
 
 ## @method @hue_range($min, $max, $dir)
 #
-# @brief Determines the hue range (for example in )
+# @brief Determines the hue range
 # @param min The minimum hue value.
 # @param max The maximum hue value.
-# @param by default the rainbow is red->green->blue (hue increases), 
-# anything else means red->blue->green (hue decreases).
-# @return 
+# @param dir (1 or -1) Determines whether the rainbow is from min to
+# max (hue increases, red->green->blue), or from max to min (hue
+# decreases, red->blue->green). Default is increase.
 sub hue_range {
     my($self, $min, $max, $dir) = @_;
     if (defined $min) {
 		$self->{HUE_AT_MIN} = $min+0;
 		$self->{HUE_AT_MAX} = $max+0;
-		$self->{HUE_DIR} = $dir ? -1 : 1;
+		$self->{HUE_DIR} = (!(defined $dir) or $dir == 1) ? 1 : -1;
     }
     return ($self->{HUE_AT_MIN}, $self->{HUE_AT_MAX}, $self->{HUE_DIR});
 }
@@ -401,16 +493,6 @@ sub hue {
 	$self->{HUE};
 }
 
-## @method $has_field($field_name)
-#
-# @brief Tells if the layer has a certain field by name.
-# @param[in] field_name Name of the field, which existence is wanted to know.
-# @return Returns true this layer has a certain attribute, else false (0).
-sub has_field {
-    my($self, $field_name) = @_;
-    return 0;
-}
-
 ## @method $symbol_field($field_name)
 #
 # @brief Get or set the field, which is used for determining the size of the 
@@ -422,7 +504,8 @@ sub has_field {
 sub symbol_field {
     my($self, $field_name) = @_;
     if (defined $field_name) {
-	if ($field_name eq 'Fixed size' or $self->has_field($field_name)) {
+	my $schema = $self->schema();
+	if ($field_name eq 'Fixed size' or $schema->{$field_name}) {
 	    $self->{SYMBOL_FIELD} = $field_name;
 	} else {
 	    croak "Layer ".$self->name()." does not have field with name: $field_name";
@@ -472,13 +555,88 @@ sub color_scale {
 sub color_field {
     my($self, $field_name) = @_;
     if (defined $field_name) {
-	if ($self->has_field($field_name)) {
+	my $schema = $self->schema();
+	if ($schema->{$field_name}) {
 	    $self->{COLOR_FIELD} = $field_name;
 	} else {
-	    croak "Layer ",$self->name,"does not have field: $field_name";
+	    croak "Layer ", $self->name, " does not have field: $field_name";
 	}
     }
     return $self->{COLOR_FIELD};
+}
+
+## @method @color_table($color_table)
+#
+# @brief Get or set the color table.
+# @param[in] color_table (optional) Name of file from where the color table can be 
+# read.
+# @return Current color table, if no parameter is given.
+# @exception A filename is given, which can't be opened/read or does not have a 
+# color table.
+
+## @method @color_table(Geo::GDAL::ColorTable color_table)
+#
+# @brief Get or set the color table.
+# @param[in] color_table (optional) Geo::GDAL::ColorTable.
+# @return Current color table, if no parameter is given.
+
+## @method @color_table(listref color_table)
+#
+# @brief Get or set the color table.
+# @param[in] color_table (optional) Reference to an array having the color table.
+# @return Current color table, if no parameter is given.
+sub color_table {
+    my($self, $color_table) = @_;
+    unless (defined $color_table) {
+		$self->{COLOR_TABLE} = [] unless $self->{COLOR_TABLE};
+		return $self->{COLOR_TABLE};
+    }
+    if (ref($color_table) eq 'ARRAY') {
+		$self->{COLOR_TABLE} = [];
+		for (@$color_table) {
+	    	push @{$self->{COLOR_TABLE}}, [@$_];
+		}
+    } elsif (ref($color_table)) {
+		for my $i (0..$color_table->GetCount-1) {
+	    	my @color = $color_table->GetColorEntryAsRGB($i);
+	    	push @{$self->{COLOR_TABLE}}, [$i, @color];
+		}
+    } else {
+		my $fh = new FileHandle;
+		croak "can't read from $color_table: $!\n" unless $fh->open("< $color_table");
+		$self->{COLOR_TABLE} = [];
+		while (<$fh>) {
+	    	next if /^#/;
+	    	my @tokens = split /\s+/;
+	    	next unless @tokens > 3;
+	    	$tokens[4] = 255 unless defined $tokens[4];
+	    	for (@tokens) {
+				$_ =~ s/\D//g;
+	    	}
+	    	for (@tokens[1..4]) {
+				$_ = 0 if $_ < 0;
+				$_ = 255 if $_ > 255;
+	    	}
+	    	push @{$self->{COLOR_TABLE}}, \@tokens;
+		}
+		$fh->close;
+    }
+}
+
+## @method save_color_table($filename)
+#
+# @brief Saves the layers color table into the file, which name is given as 
+# parameter.
+# @param[in] filename Name of file where the color table is saved.
+# @exception A filename is given, which can't be written to.
+sub save_color_table {
+    my($self, $filename) = @_;
+    my $fh = new FileHandle;
+    croak "can't write to $filename: $!\n" unless $fh->open("> $filename");
+    for my $color (@{$self->{COLOR_TABLE}}) {
+	print $fh "@$color\n";
+    }
+    $fh->close;
 }
 
 ## @method @color_bins($color_bins)
@@ -520,7 +678,7 @@ sub color_bins {
 				$_ = 0 if $_ < 0;
 				$_ = 255 if $_ > 255;
 		    }
-		    push @{$self->{COLOR_BINS}},\@tokens;
+		    push @{$self->{COLOR_BINS}}, \@tokens;
 		}
 		$fh->close;
     }
@@ -546,7 +704,7 @@ sub save_color_bins {
 #
 # @brief Sets the labeling for the layer.
 # @param[in] labeling An anonymous hash containing the labeling: 
-# { field => , font => , color => [r,g,b,a], min_size => }
+# { field => , font => , color => [r, g, b, a], min_size => }
 # @return labeling in an anonymous hash
 sub labeling {
     my($self, $labeling) = @_;
@@ -567,6 +725,53 @@ sub labeling {
     return $labeling;
 }
 
+## @method select(%params)
+#
+# @brief Select features based on user input.
+# @param params named params, the key is something that is recognized by the features method
+# and the value is a geometry the user has defined
+# - <I>key</I> A Geo::OGR::Geometry object representing the point or area the user has selected
+# The key, value pair is fed as such to features subroutine. 
+# A call without parameters deselects all features.
+sub select {
+    my($self, %params) = @_;
+    if (@_ > 1) {
+	for my $key (keys %params) {
+	    my $features = $self->features($key => $params{$key});
+	    $self->selected_features($features);
+	}
+    } else {
+	$self->{SELECTED_FEATURES} = [];
+    }
+}
+
+# get or set the selected features, give an array ref
+sub selected_features {
+    my($self, $selected) = @_;
+    if (defined $selected) {
+	$self->{SELECTED_FEATURES} = $selected;
+    } else {
+	return $self->{SELECTED_FEATURES};
+    }
+}
+
+# spatial selection of features, return a ref to an array of matching features
+sub features {
+}
+
+## @method schema()
+#
+# @brief Return the schema of the layer as an anonymous hash. 
+#
+# For the structure of the schema hash see Geo::Vector::schema
+sub schema {
+    return { dummy => { TypeName => 'Integer' } };
+}
+
+sub value_range {
+    return (0, 0);
+}
+
 ## @method render_selection($gc)
 #
 # @brief Render the selection using the given graphics context
@@ -574,27 +779,52 @@ sub labeling {
 sub render_selection {
 }
 
+## @method $bootstrap_dialog($gui, $dialog, $title, $bootstrap)
+#
+# @brief Bootstrap the requested dialog.
+# @return the GladeXML object of the dialog.
+sub bootstrap_dialog {
+    my($self, $gui, $dialog, $title, $connects) = @_;
+    unless ($self->{$dialog}) {
+	$self->{$dialog} = $gui->get_dialog($dialog);
+	croak "$dialog does not exist" unless $self->{$dialog};
+	for (keys %$connects) {
+	    $self->{$dialog}->get_widget($_)->signal_connect(@{$connects->{$_}});
+	}
+    } elsif (!$self->{$dialog}->get_widget($dialog)->get('visible')) {
+	$self->{$dialog}->get_widget($dialog)->move(@{$self->{$dialog.'_position'}});
+	$self->{$dialog}->get_widget($dialog)->show_all;
+    }
+    $self->{$dialog}->get_widget($dialog)->set_title($title);
+    $self->{$dialog}->get_widget($dialog)->present;
+    return $self->{$dialog};
+}
+
+## @method $dialog_visible($dialog)
+#
+# @brief Return true is the given (name of a ) dialog is visible.
+sub dialog_visible {
+    my($self, $dialog) = @_;
+    my $d = $self->{$dialog};
+    return 0 unless $d;
+    return $d->get_widget($dialog)->get('visible');
+}
+
+## @method open_symbols_dialog($gui)
+# @brief Open the symbols dialog for this layer.
 sub open_symbols_dialog {
     my($self, $gui) = @_;
 
-    # bootstrap:
-    my $dialog = $self->{symbols_dialog};
-    unless ($dialog) {
-	$self->{symbols_dialog} = $dialog = $gui->get_dialog('symbols_dialog');
-	croak "symbols_dialog for Geo::Vector does not exist" unless $dialog;
-	$dialog->get_widget('symbols_dialog')->set_title("Symbols for ".$self->name);
-	$dialog->get_widget('symbols_dialog')->signal_connect(delete_event => \&cancel_symbols, [$self, $gui]);
-
-	$dialog->get_widget('symbols_scale_button')->signal_connect(clicked=>\&fill_symbol_scale_fields, [$self, $gui]);
-	$dialog->get_widget('symbols_field_combobox')->signal_connect(changed=>\&symbol_field_changed, [$self, $gui]);
-	$dialog->get_widget('symbols_type_combobox')->signal_connect(changed=>\&symbol_field_changed, [$self, $gui]);
-
-	$dialog->get_widget('symbols_apply_button')->signal_connect(clicked => \&apply_symbols, [$self, $gui, 0]);
-	$dialog->get_widget('symbols_cancel_button')->signal_connect(clicked => \&cancel_symbols, [$self, $gui]);
-	$dialog->get_widget('symbols_ok_button')->signal_connect(clicked => \&apply_symbols, [$self, $gui, 1]);
-    } else {
-	$dialog->get_widget('symbols_dialog')->move(@{$self->{symbols_dialog_position}});
-    }
+    my $dialog = $self->bootstrap_dialog($gui, 'symbols_dialog', "Symbols for ".$self->name,
+					 {
+					     symbols_dialog => [delete_event => \&cancel_symbols, [$self, $gui]],
+					     symbols_scale_button => [clicked => \&fill_symbol_scale_fields, [$self, $gui]],
+					     symbols_field_combobox => [changed=>\&symbol_field_changed, [$self, $gui]],
+					     symbols_type_combobox => [changed=>\&symbol_field_changed, [$self, $gui]],
+					     symbols_apply_button => [clicked => \&apply_symbols, [$self, $gui, 0]],
+					     symbols_cancel_button => [clicked => \&cancel_symbols, [$self, $gui]],
+					     symbols_ok_button => [clicked => \&apply_symbols, [$self, $gui, 1]],
+					 });
     
     my $symbol_type_combo = $dialog->get_widget('symbols_type_combobox');
     my $field_combo = $dialog->get_widget('symbols_field_combobox');
@@ -621,7 +851,6 @@ sub open_symbols_dialog {
     $scale_max->set_text($scale[1]);
     $size_spin->set_value($size);
     
-    $dialog->get_widget('symbols_dialog')->show_all;
 }
 
 ##@ignore
@@ -737,11 +966,13 @@ sub fill_symbol_scale_fields {
     my @range;
     my $field = $self->get_selected_symbol_field();
     return if $field eq 'Fixed size';
+    my @r = $gui->{overlay}->get_viewport_of_selection;
+    @r = $gui->{overlay}->get_viewport unless @r;
     eval {
-	@range = $self->value_range(field_name => $field, filter_rect => [$self->{overlay}->get_focus()]);
+	@range = $self->value_range(field_name => $field, filter_rect => \@r);
     };
     if ($@) {
-	$self->message("$@");
+	$gui->message("$@");
 	return;
     }
     $self->{symbols_dialog}->get_widget('symbols_scale_min_entry')->set_text($range[0]);
@@ -776,40 +1007,37 @@ sub symbol_field_changed {
 
 sub open_colors_dialog {
     my($self, $gui) = @_;
-    # bootstrap:
-    my $dialog = $self->{colors_dialog};
-    unless ($dialog) {
-	$self->{colors_dialog} = $dialog = $gui->get_dialog('colors_dialog');
-	croak "colors_dialog for Geo::Layer does not exist" unless $dialog;
-	$dialog->get_widget('colors_dialog')->set_title("Colors for ".$self->name);
-	$dialog->get_widget('colors_dialog')->signal_connect(delete_event => \&cancel_colors, [$self, $gui]);
 
-	$dialog->get_widget('color_scale_button')->signal_connect(clicked=>\&fill_color_scale_fields, [$self, $gui]);
-	$dialog->get_widget('color_legend_button')->signal_connect(clicked=>\&make_color_legend, [$self, $gui]);
-	$dialog->get_widget('get_colors_button')->signal_connect(clicked=>\&get_colors, [$self, $gui]);
-	$dialog->get_widget('open_colors_button')->signal_connect(clicked=>\&open_colors_file, [$self, $gui]);
-	$dialog->get_widget('save_colors_button')->signal_connect(clicked=>\&save_colors_file, [$self, $gui]);
-	$dialog->get_widget('edit_color_button')->signal_connect(clicked=>\&edit_color, [$self, $gui]);
-	$dialog->get_widget('delete_color_button')->signal_connect(clicked=>\&delete_color, [$self, $gui]);
-	$dialog->get_widget('add_color_button')->signal_connect(clicked=>\&add_color, [$self, $gui]);
-	$dialog->get_widget('palette_type_combobox')->signal_connect(changed=>\&palette_type_changed, [$self, $gui]);
-	$dialog->get_widget('color_field_combobox')->signal_connect(changed=>\&color_field_changed, [$self, $gui]);
-	
-	$dialog->get_widget('colors_apply_button')->signal_connect(clicked => \&apply_colors, [$self, $gui, 0]);
-	$dialog->get_widget('colors_cancel_button')->signal_connect(clicked => \&cancel_colors, [$self, $gui]);
-	$dialog->get_widget('colors_ok_button')->signal_connect(clicked => \&apply_colors, [$self, $gui, 1]);
-    } else {
-	$dialog->get_widget('colors_dialog')->move(@{$self->{colors_dialog_position}});
-    }
-
+    my $dialog = $self->bootstrap_dialog($gui, 'colors_dialog', "Colors for ".$self->name,
+					 {
+					     colors_dialog => [delete_event => \&cancel_colors, [$self, $gui]],
+					     color_scale_button => [clicked => \&fill_color_scale_fields, [$self, $gui]],
+					     color_legend_button => [clicked => \&make_color_legend, [$self, $gui]],
+					     get_colors_button => [clicked => \&get_colors, [$self, $gui]],
+					     open_colors_button => [clicked => \&open_colors_file, [$self, $gui]],
+					     save_colors_button => [clicked => \&save_colors_file, [$self, $gui]],
+					     edit_color_button => [clicked => \&edit_color, [$self, $gui]],
+					     delete_color_button => [clicked => \&delete_color, [$self, $gui]],
+					     add_color_button => [clicked => \&add_color, [$self, $gui]],
+					     palette_type_combobox => [changed => \&palette_type_changed, [$self, $gui]],
+					     color_field_combobox => [changed => \&color_field_changed, [$self, $gui]],
+					     min_hue_button => [clicked => \&set_hue_range, [$self, $gui, 'min']],
+					     max_hue_button => [clicked => \&set_hue_range, [$self, $gui, 'max']],
+					     hue_button => [clicked => \&set_hue, [$self, $gui]],
+					     colors_apply_button => [clicked => \&apply_colors, [$self, $gui, 0]],
+					     colors_cancel_button => [clicked => \&cancel_colors, [$self, $gui]],
+					     colors_ok_button => [clicked => \&apply_colors, [$self, $gui, 1]],
+					 });
+    
     my $palette_type_combo = $dialog->get_widget('palette_type_combobox');
     my $field_combo = $dialog->get_widget('color_field_combobox');
     my $scale_min = $dialog->get_widget('color_scale_min_entry');
     my $scale_max = $dialog->get_widget('color_scale_max_entry');
-    my $hue_min = $dialog->get_widget('hue_min_entry');
-    my $hue_max = $dialog->get_widget('hue_max_entry');
+    my $hue_min = $dialog->get_widget('min_hue_label');
+    my $hue_max = $dialog->get_widget('max_hue_label');
     my $hue_range_sel = $dialog->get_widget('hue_range_combobox');
-    my $hue = $dialog->get_widget('hue_entry');
+    my $hue_button = $dialog->get_widget('hue_checkbutton');
+    my $hue = $dialog->get_widget('hue_label');
 
     $self->{current_coloring_type} = '';
 
@@ -840,15 +1068,19 @@ sub open_colors_dialog {
     $scale_max->set_text($scale[1]);
     $hue_min->set_text($hue_range[0]);
     $hue_max->set_text($hue_range[1]);
-    $hue_range_sel->set_active($hue_range[2]);
-    $hue->set_text($self->hue);
+    $hue_range_sel->set_active($hue_range[2] == 1 ? 0 : 1);
+    $hue_button->set_active($self->hue > 0 ? TRUE : FALSE);
+    my @color = $self->hue;
+    $hue->set_text("@color");
+    palette_type_changed(undef, [$self, $gui]);
+    color_field_changed(undef, [$self, $gui]);
     if ($palette_type eq 'Single color') {
 	$self->fill_colors_treeview([[@single_color]]);
     } elsif ($palette_type eq 'Color table') {
 	$self->fill_colors_treeview($table);
     } elsif ($palette_type eq 'Color bins') {
 	$self->fill_colors_treeview($bins);
-    }    
+    }
 
     $dialog->get_widget('colors_dialog')->show_all;
 }
@@ -867,10 +1099,11 @@ sub apply_colors {
     my $scale_max = $dialog->get_widget('color_scale_max_entry');
     $self->color_scale($scale_min->get_text(), $scale_max->get_text());
 
-    $self->hue_range($dialog->get_widget('hue_min_entry')->get_text,
-		     $dialog->get_widget('hue_max_entry')->get_text,
-		     $dialog->get_widget('hue_range_combobox')->get_active);
-    $self->hue($dialog->get_widget('hue_entry')->get_text);
+    $self->hue_range($dialog->get_widget('min_hue_label')->get_text,
+		     $dialog->get_widget('max_hue_label')->get_text,
+		     $dialog->get_widget('hue_range_combobox')->get_active == 0 ? 1 : -1);
+    my $hue = $dialog->get_widget('hue_checkbutton')->get_active();
+    $self->hue($hue ? $dialog->get_widget('hue_label')->get_text : -1);
     
     if ($palette_type eq 'Single color') {
 	my $table = $self->get_table_from_treeview();
@@ -883,7 +1116,13 @@ sub apply_colors {
 	$self->color_bins($table);
     }
 
-    $dialog->get_widget('colors_dialog')->hide() if $close;
+    if ($palette_type eq 'Grayscale' or $palette_type eq 'Rainbow') {
+	$self->put_scale_in_treeview($dialog->get_widget('colors_treeview'), $palette_type);
+    }
+
+    $dialog = $dialog->get_widget('colors_dialog');
+    $self->{colors_dialog_position} = [$dialog->get_position];
+    $dialog->hide() if $close;
     $gui->{overlay}->render;
 }
 
@@ -1144,10 +1383,11 @@ sub palette_type_changed {
     $dialog->get_widget('color_field_combobox')->set_sensitive(0);
     $dialog->get_widget('color_scale_min_entry')->set_sensitive(0);
     $dialog->get_widget('color_scale_max_entry')->set_sensitive(0);
-    $dialog->get_widget('hue_min_entry')->set_sensitive(0);
-    $dialog->get_widget('hue_max_entry')->set_sensitive(0);
+    $dialog->get_widget('min_hue_button')->set_sensitive(0);
+    $dialog->get_widget('max_hue_button')->set_sensitive(0);
     $dialog->get_widget('hue_range_combobox')->set_sensitive(0);
-    $dialog->get_widget('hue_entry')->set_sensitive(0);
+    $dialog->get_widget('hue_checkbutton')->set_sensitive(0);
+    $dialog->get_widget('hue_button')->set_sensitive(0);
     $tv->set_sensitive(0);
     $dialog->get_widget('get_colors_button')->set_sensitive(0);
     $dialog->get_widget('open_colors_button')->set_sensitive(0);
@@ -1162,10 +1402,11 @@ sub palette_type_changed {
     }
 
     if ($palette_type eq 'Grayscale') {
-	$dialog->get_widget('hue_entry')->set_sensitive(1);
+	$dialog->get_widget('hue_checkbutton')->set_sensitive(1);
+	$dialog->get_widget('hue_button')->set_sensitive(1);
     } elsif ($palette_type eq 'Grayscale' or $palette_type eq 'Rainbow') {
-	$dialog->get_widget('hue_min_entry')->set_sensitive(1);
-	$dialog->get_widget('hue_max_entry')->set_sensitive(1);
+	$dialog->get_widget('min_hue_button')->set_sensitive(1);
+	$dialog->get_widget('max_hue_button')->set_sensitive(1);
 	$dialog->get_widget('hue_range_combobox')->set_sensitive(1);
     }
 
@@ -1245,24 +1486,23 @@ sub create_colors_treeview {
     if ($palette_type ne 'Single color') {
 	$cell = Gtk2::CellRendererText->new;
 	$cell->set(editable => 1);
-	$cell->signal_connect(edited=>\&cell_in_colors_treeview_changed, [$self, $i]);
+	$cell->signal_connect(edited => \&cell_in_colors_treeview_changed, [$self, $i]);
 	$column = Gtk2::TreeViewColumn->new_with_attributes('value', $cell, text => $i++);
 	$tv->append_column($column);
     }
 
     $cell = Gtk2::CellRendererPixbuf->new;
-    $cell->set_fixed_size($color_cell_size-2,$color_cell_size-2);
+    $cell->set_fixed_size($COLOR_CELL_SIZE-2,$COLOR_CELL_SIZE-2);
     $column = Gtk2::TreeViewColumn->new_with_attributes('color', $cell, pixbuf => $i++);
     $tv->append_column($column);
 
     foreach my $c ('red','green','blue','alpha') {
 	$cell = Gtk2::CellRendererText->new;
 	$cell->set(editable => 1);
-	$cell->signal_connect(edited=>\&cell_in_colors_treeview_changed, [$self, $i-1]);
+	$cell->signal_connect(edited => \&cell_in_colors_treeview_changed, [$self, $i-1]);
 	$column = Gtk2::TreeViewColumn->new_with_attributes($c, $cell, text => $i++);
 	$tv->append_column($column);
     }
-
     $self->fill_colors_treeview($table);
 }
 
@@ -1440,13 +1680,55 @@ sub set_color {
     my @set = ($iter);
     my $j = 0;
     push @set, ($j++, $value) if defined $value;
-    my $pb = Gtk2::Gdk::Pixbuf->new('rgb',0,8,$color_cell_size,$color_cell_size);
+    my $pb = Gtk2::Gdk::Pixbuf->new('rgb',0,8,$COLOR_CELL_SIZE,$COLOR_CELL_SIZE);
     $pb->fill($color[0] << 24 | $color[1] << 16 | $color[2] << 8);
     push @set, ($j++, $pb);
     for my $k (0..3) {
 	push @set, ($j++, $color[$k]);
     }
     $model->set(@set);
+}
+
+##@ignore
+sub set_hue_range {
+    my($self, $gui, $dir) = @{$_[1]};
+    my $dialog = $self->{colors_dialog};
+    my $hue = $dialog->get_widget($dir.'_hue_label')->get_text();
+    my @color = hsv2rgb($hue, 1, 1);
+    my $color_chooser = Gtk2::ColorSelectionDialog->new('Choose $dir hue for rainbow palette');
+    my $s = $color_chooser->colorsel;
+    $s->set_has_opacity_control(0);
+    my $c = new Gtk2::Gdk::Color ($color[0]*257,$color[1]*257,$color[2]*257);
+    $s->set_current_color($c);
+    if ($color_chooser->run eq 'ok') {
+	$c = $s->get_current_color;
+	@color = (int($c->red/257),int($c->green/257),int($c->blue/257));
+	@color = rgb2hsv(@color);
+	my $hue = $dialog->get_widget($dir.'_hue_label')->set_text(int($color[0]));
+    }
+    $color_chooser->destroy;
+}
+
+##@ignore
+sub set_hue {
+    my($self, $gui) = @{$_[1]};
+    my $dialog = $self->{colors_dialog};
+    my $hue = $dialog->get_widget('hue_label')->get_text();
+    $hue = 0 if $hue < 0;
+    my @color = hsv2rgb($hue, 1, 1);
+    my $color_chooser = Gtk2::ColorSelectionDialog->new('Choose hue for grayscale palette');
+    my $s = $color_chooser->colorsel;
+    $s->set_has_opacity_control(0);
+    my $c = new Gtk2::Gdk::Color ($color[0]*257,$color[1]*257,$color[2]*257);
+    $s->set_current_color($c);
+    if ($color_chooser->run eq 'ok') {
+	$c = $s->get_current_color;
+	@color = (int($c->red/257),int($c->green/257),int($c->blue/257));
+	@color = rgb2hsv(@color);
+	my $hue = $dialog->get_widget('hue_label')->set_text(int($color[0]));
+	$dialog->get_widget('hue_checkbutton')->set_active(TRUE);
+    }
+    $color_chooser->destroy;
 }
 
 ##@ignore
@@ -1462,7 +1744,7 @@ sub put_scale_in_treeview {
 
     my $i = 0;
     my $cell = Gtk2::CellRendererPixbuf->new;
-    $cell->set_fixed_size($color_cell_size-2,$color_cell_size-2);
+    $cell->set_fixed_size($COLOR_CELL_SIZE-2,$COLOR_CELL_SIZE-2);
     my $column = Gtk2::TreeViewColumn->new_with_attributes('color', $cell, pixbuf => $i++);
     $tv->append_column($column);
 
@@ -1474,18 +1756,19 @@ sub put_scale_in_treeview {
     my $dialog = $self->{colors_dialog};
     my $min = $dialog->get_widget('color_scale_min_entry')->get_text();
     my $max = $dialog->get_widget('color_scale_max_entry')->get_text();
-    my $hue_min = MAX(MIN($dialog->get_widget('hue_min_entry')->get_text() || 0,360),0);
-    my $hue_max = MAX(MIN($dialog->get_widget('hue_max_entry')->get_text() || 0,360),0);
-    my $hue_dir = $dialog->get_widget('hue_range_combobox')->get_active;
+    my ($hue_min) = $dialog->get_widget('min_hue_label')->get_text() =~ /(\d+)/;
+    my ($hue_max) = $dialog->get_widget('max_hue_label')->get_text() =~ /(\d+)/;
+    my $hue_dir = $dialog->get_widget('hue_range_combobox')->get_active == 0 ? 1 : -1; # up is 1, down is -1
     if ($hue_dir == 1) {
 	$hue_max += 360 if $hue_max < $hue_min;
     } else {
 	$hue_max -= 360 if $hue_max > $hue_min;
     }
-    my $hue = $dialog->get_widget('hue_entry')->get_text();
+    my $hue = $dialog->get_widget('hue_checkbutton')->get_active() ? 
+	$dialog->get_widget('hue_label')->get_text() : -1;
     return if $min eq '' or $max eq '';
     my $delta = ($max-$min)/14;
-    my $x = $min;
+    my $x = $max;
     for my $i (1..15) {
 	my $iter = $model->append(undef);
 
@@ -1497,19 +1780,19 @@ sub put_scale_in_treeview {
 		$h = 0;
 		$s = 0;
 	    } else {
-		$h = min($hue, 360);
-		$s = 100;
+		$h = $hue;
+		$s = 1;
 	    }
-	    $v = $delta == 0 ? 0 : ($x - $min)/($max - $min)*100;
+	    $v = $delta == 0 ? 0 : ($x - $min)/($max - $min)*1;
 	} else {
 	    $h = $delta == 0 ? 0 : int($hue_min + ($x - $min)/($max-$min) * ($hue_max-$hue_min) + 0.5);
 	    $h -= 360 if $h > 360;
 	    $h += 360 if $h < 0;
-	    $s = 100;
-	    $v = 100;
+	    $s = 1;
+	    $v = 1;
 	}
 	
-	my $pb = Gtk2::Gdk::Pixbuf->new('rgb',0,8,$color_cell_size,$color_cell_size);
+	my $pb = Gtk2::Gdk::Pixbuf->new('rgb', 0, 8, $COLOR_CELL_SIZE, $COLOR_CELL_SIZE);
 	my @color = hsv2rgb($h, $s, $v);
 	$pb->fill($color[0] << 24 | $color[1] << 16 | $color[2] << 8);
 
@@ -1517,56 +1800,8 @@ sub put_scale_in_treeview {
 	push @set, ($j++, $pb);
 	push @set, ($j++, $x);
 	$model->set(@set);
-	$x += $delta;
+	$x -= $delta;
     }
-}
-
-sub hsv2rgb {
-    # /* after www.cs.rit.edu/~ncs/color/t_convert.html */
-    my($h, $s, $v) = @_;
-    if( $s == 0 ) {
-	#// achromatic (grey)
-	my $grey = floor(255.999*$v/100);
-	return ($grey, $grey, $grey);
-    }
-
-    $h /= 60;			#// sector 0 to 5
-    $s /= 100;
-    $v /= 100;
-    my $i = floor( $h );
-    $i = 5 if $i == 6;
-    my $f = $h - $i;		#// factorial part of h
-    my $p = $v * ( 1 - $s );
-    my $q = $v * ( 1 - $s * $f );
-    my $t = $v * ( 1 - $s * ( 1 - $f ) );
-    my ($r, $g, $b);
-
-    if ( $i == 0 ) {
-	$r = $v;
-	$g = $t;
-	$b = $p;
-    } elsif ( $i == 1 ) {
-	$r = $q;
-	$g = $v;
-	$b = $p;
-    } elsif ( $i == 2 ) {
-	$r = $p;
-	$g = $v;
-	$b = $t;
-    } elsif ( $i == 3 ) {
-	$r = $p;
-	$g = $q;
-	$b = $v;
-    } elsif ( $i == 4 ) {
-	$r = $t;
-	$g = $p;
-	$b = $v;
-    } else { # 5
-	$r = $v;
-	$g = $p;
-	$b = $q;
-    }
-    return (floor(255.999*$r), floor(255.999*$g), floor(255.999*$b));
 }
 
 ##@ignore
@@ -1603,6 +1838,7 @@ sub colors_from_dialog {
 
     #$dialog->move(@{$self->{colors_from_position}}) if $self->{colors_from_position};
     $dialog->get_widget('colors_from_dialog')->show_all;
+    $dialog->get_widget('colors_from_dialog')->present;
 
     my $response = $dialog->get_widget('colors_from_dialog')->run;
 
@@ -1634,23 +1870,15 @@ sub colors_from_dialog {
 sub open_labels_dialog {
     my($self, $gui) = @_;
 
-    # bootstrap:
-    my $dialog = $self->{labels_dialog};
-    unless ($dialog) {
-	$self->{labels_dialog} = $dialog = $gui->get_dialog('labels_dialog');
-	croak "labels_dialog for Geo::Vector does not exist" unless $dialog;
-	$dialog->get_widget('labels_dialog')->set_title("Labels for ".$self->name);
-	$dialog->get_widget('labels_dialog')->signal_connect(delete_event => \&cancel_labels, [$self, $gui]);
-
-	$dialog->get_widget('labels_font_button')->signal_connect(clicked => \&labels_font, [$self, $gui, 0]);
-	$dialog->get_widget('labels_color_button')->signal_connect(clicked => \&labels_color, [$self, $gui, 0]);
-	
-	$dialog->get_widget('apply_labels_button')->signal_connect(clicked => \&apply_labels, [$self, $gui, 0]);
-	$dialog->get_widget('cancel_labels_button')->signal_connect(clicked => \&cancel_labels, [$self, $gui]);
-	$dialog->get_widget('ok_labels_button')->signal_connect(clicked => \&apply_labels, [$self, $gui, 1]);
-    } else {
-	$dialog->get_widget('labels_dialog')->move(@{$self->{labels_dialog_position}});
-    }
+    my $dialog = $self->bootstrap_dialog($gui, 'labels_dialog', "Labels for ".$self->name,
+					 {
+					     labels_dialog => [delete_event => \&cancel_labels, [$self, $gui]],
+					     labels_font_button => [clicked => \&labels_font, [$self, $gui, 0]],
+					     labels_color_button => [clicked => \&labels_color, [$self, $gui, 0]],
+					     apply_labels_button => [clicked => \&apply_labels, [$self, $gui, 0]],
+					     cancel_labels_button => [clicked => \&cancel_labels, [$self, $gui]],
+					     ok_labels_button => [clicked => \&apply_labels, [$self, $gui, 1]],
+					 });
 
     # backup
 
