@@ -46,7 +46,7 @@ BEGIN {
     our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
     our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
     our @EXPORT = qw( );
-    our $VERSION = '0.54';
+    our $VERSION = '0.55';
     XSLoader::load( 'Gtk2::Ex::Geo', $VERSION );
 }
 
