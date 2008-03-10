@@ -1,14 +1,20 @@
 use Carp;
+use Gtk2::Ex::Geo;
+use Gtk2::TestHelper tests => 11;
+
 eval {
     require IPC::Gnuplot;
 };
 my $have_gnuplot = !$@;
-use Gtk2::Ex::Geo;
-use Gtk2::TestHelper tests => 11;
 
 {
-    package Gtk2::Ex::Geo::Test;
+    package My::Test::Layer;
     our @ISA = qw(Gtk2::Ex::Geo::Layer);
+    sub registration {
+	my $class = shift;
+	my $registration = $class->SUPER::registration() if $class;
+	return $registration;
+    }
     sub new {
 	my($package) = @_;
 	my $self = Gtk2::Ex::Geo::Layer::new($package);
@@ -25,8 +31,7 @@ use Gtk2::TestHelper tests => 11;
     }
 }
 
-my @r = (Gtk2::Ex::Geo::Layer::registration());
-my($window, $gis) = Gtk2::Ex::Geo::simple(registrations => \@r);
+my($window, $gis) = Gtk2::Ex::Geo::simple(classes => [qw/My::Test::Layer/]);
 ok(1);
 
 if ($have_gnuplot) {
@@ -35,7 +40,7 @@ if ($have_gnuplot) {
     $gis->register_function( name => 'p', object => $gnuplot );
 }
 
-my $layer = Gtk2::Ex::Geo::Test->new();
+my $layer = My::Test::Layer->new();
 $gis->add_layer($layer);
 
 $gis->register_commands

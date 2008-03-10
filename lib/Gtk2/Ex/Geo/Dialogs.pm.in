@@ -31,7 +31,7 @@ sub new {
     my @buffer = <DATA>;
     pop @buffer unless $buffer[$#buffer] =~ /^\</; # remove the extra content
 
-    Gtk2::Ex::Geo::DialogMaster::new($class, %params, buffer => \@buffer);
+    return Gtk2::Ex::Geo::DialogMaster::new($class, %params, buffer => \@buffer);
 }
 
 1;

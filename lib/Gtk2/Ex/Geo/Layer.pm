@@ -112,6 +112,15 @@ sub label_placements {
     return sort {$LABEL_PLACEMENT{$a} <=> $LABEL_PLACEMENT{$b}} keys %LABEL_PLACEMENT;
 }
 
+## @cmethod $upgrade($object) 
+#
+# @brief Upgrade object from substance class to the respective layer
+# class
+sub upgrade {
+    my($object) = @_;
+    return $object;
+}
+
 ## @cmethod new(%params)
 # @brief constructs a new layer object or blesses an object into a layer class
 # Calls defaults with the given parameters.
@@ -187,7 +196,7 @@ sub defaults {
     $self->{HUE_DIR} = $params{hue_dir} if exists $params{hue_dir};
     $self->{HUE} = $params{hue} if exists $params{hue};
     @{$self->{SINGLE_COLOR}} = @{$params{single_color}} if exists $params{single_color};
-    $self->{SINGLE_TABLE} = $params{color_table} if exists $params{color_table};
+    $self->{COLOR_TABLE} = $params{color_table} if exists $params{color_table};
     $self->{COLOR_BINS} = $params{color_bins} if exists $params{color_bins};
     $self->{COLOR_SCALE_MIN} = $params{color_scale_min} if exists $params{color_scale_min};
     $self->{COLOR_SCALE_MAX} = $params{color_scale_max} if exists $params{color_scale_max};
@@ -273,7 +282,7 @@ sub border_color {
     my($self, @color) = @_;
     @{$self->{BORDER_COLOR}} = @color if @color;
     return @{$self->{BORDER_COLOR}} if defined wantarray;
-    @{$self->{BORDER_COLOR}} = [] unless @color;
+    @{$self->{BORDER_COLOR}} = () unless @color;
 }
 
 ## @method inspect_data
@@ -301,14 +310,6 @@ sub open_features_dialog {
     croak("no features dialog defined for class ".ref($self));
 }
 
-## @method void features_selected(Gtk2::Ex::Glue gui)
-# 
-# @brief The user has made a selection in the overlay
-# @param gui A Gtk2::Ex::Glue object (contains predefined dialogs).
-sub features_selected {
-    my($self, $gui) = @_;
-}
-
 ## @cmethod hashref menu_items($items)
 #
 # @brief Reports the class menu items (name and sub) for the GUI.
@@ -327,6 +328,7 @@ sub menu_items {
 	    my($self, $gui) = @{$_[1]};
 	    $self->select;
 	    $gui->{overlay}->update_image;
+	    $self->open_features_dialog($gui) if $self->dialog_visible('features_dialog');
 	}
     };
     $items->{'_Symbol...'} =
@@ -587,39 +589,44 @@ sub color_field {
 # @return Current color table, if no parameter is given.
 sub color_table {
     my($self, $color_table) = @_;
-    unless (defined $color_table) {
-		$self->{COLOR_TABLE} = [] unless $self->{COLOR_TABLE};
-		return $self->{COLOR_TABLE};
+    unless (defined $color_table) 
+    {
+	$self->{COLOR_TABLE} = [] unless $self->{COLOR_TABLE};
+	return $self->{COLOR_TABLE};
     }
-    if (ref($color_table) eq 'ARRAY') {
-		$self->{COLOR_TABLE} = [];
-		for (@$color_table) {
-	    	push @{$self->{COLOR_TABLE}}, [@$_];
-		}
-    } elsif (ref($color_table)) {
-		for my $i (0..$color_table->GetCount-1) {
-	    	my @color = $color_table->GetColorEntryAsRGB($i);
-	    	push @{$self->{COLOR_TABLE}}, [$i, @color];
-		}
-    } else {
-		my $fh = new FileHandle;
-		croak "can't read from $color_table: $!\n" unless $fh->open("< $color_table");
-		$self->{COLOR_TABLE} = [];
-		while (<$fh>) {
-	    	next if /^#/;
-	    	my @tokens = split /\s+/;
-	    	next unless @tokens > 3;
-	    	$tokens[4] = 255 unless defined $tokens[4];
-	    	for (@tokens) {
-				$_ =~ s/\D//g;
-	    	}
-	    	for (@tokens[1..4]) {
-				$_ = 0 if $_ < 0;
-				$_ = 255 if $_ > 255;
-	    	}
-	    	push @{$self->{COLOR_TABLE}}, \@tokens;
-		}
-		$fh->close;
+    if (ref($color_table) eq 'ARRAY') 
+    {
+	$self->{COLOR_TABLE} = [];
+	for (@$color_table) {
+	    push @{$self->{COLOR_TABLE}}, [@$_];
+	}
+    } elsif (ref($color_table)) 
+    {
+	$self->{COLOR_TABLE} = [];
+	for my $i (0..$color_table->GetCount-1) {
+	    my @color = $color_table->GetColorEntryAsRGB($i);
+	    push @{$self->{COLOR_TABLE}}, [$i, @color];
+	}
+    } else 
+    {
+	my $fh = new FileHandle;
+	croak "can't read from $color_table: $!\n" unless $fh->open("< $color_table");
+	$self->{COLOR_TABLE} = [];
+	while (<$fh>) {
+	    next if /^#/;
+	    my @tokens = split /\s+/;
+	    next unless @tokens > 3;
+	    $tokens[4] = 255 unless defined $tokens[4];
+	    for (@tokens) {
+		$_ =~ s/\D//g;
+	    }
+	    for (@tokens[1..4]) {
+		$_ = 0 if $_ < 0;
+		$_ = 255 if $_ > 255;
+	    }
+	    push @{$self->{COLOR_TABLE}}, \@tokens;
+	}
+	$fh->close;
     }
 }
 
@@ -1262,7 +1269,7 @@ sub edit_color {
     my $s = $d->colorsel;
 	    
     $s->set_has_opacity_control(1);
-    my $c = new Gtk2::Gdk::Color ($color[0]*257,$color[1]*257,$color[2]*257);
+    my $c = Gtk2::Gdk::Color->new($color[0]*257,$color[1]*257,$color[2]*257);
     $s->set_current_color($c);
     $s->set_current_alpha($color[3]*257);
     
@@ -1698,7 +1705,7 @@ sub set_hue_range {
     my $color_chooser = Gtk2::ColorSelectionDialog->new('Choose $dir hue for rainbow palette');
     my $s = $color_chooser->colorsel;
     $s->set_has_opacity_control(0);
-    my $c = new Gtk2::Gdk::Color ($color[0]*257,$color[1]*257,$color[2]*257);
+    my $c = Gtk2::Gdk::Color->new($color[0]*257,$color[1]*257,$color[2]*257);
     $s->set_current_color($c);
     if ($color_chooser->run eq 'ok') {
 	$c = $s->get_current_color;
@@ -1719,7 +1726,7 @@ sub set_hue {
     my $color_chooser = Gtk2::ColorSelectionDialog->new('Choose hue for grayscale palette');
     my $s = $color_chooser->colorsel;
     $s->set_has_opacity_control(0);
-    my $c = new Gtk2::Gdk::Color ($color[0]*257,$color[1]*257,$color[2]*257);
+    my $c = Gtk2::Gdk::Color->new($color[0]*257,$color[1]*257,$color[2]*257);
     $s->set_current_color($c);
     if ($color_chooser->run eq 'ok') {
 	$c = $s->get_current_color;
@@ -1991,7 +1998,7 @@ sub labels_color {
     my $color_chooser = Gtk2::ColorSelectionDialog->new('Choose color for the label font');
     my $s = $color_chooser->colorsel;    
     $s->set_has_opacity_control(1);
-    my $c = new Gtk2::Gdk::Color ($color[0]*257,$color[1]*257,$color[2]*257);
+    my $c = Gtk2::Gdk::Color->new($color[0]*257,$color[1]*257,$color[2]*257);
     $s->set_current_color($c);
     $s->set_current_alpha($color[3]*257);
     if ($color_chooser->run eq 'ok') {

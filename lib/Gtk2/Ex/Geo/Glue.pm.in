@@ -22,7 +22,6 @@ documentation of Gtk2::Ex::Geo</a> is written in doxygen format.
 use warnings;
 use UNIVERSAL qw(isa);
 use Carp;
-use Term::ReadLine;
 
 use Gtk2::Ex::Geo::Overlay;
 use Gtk2::Ex::Geo::Layer;
@@ -53,6 +52,10 @@ sub new {
     
     $self->{model} = Gtk2::TreeStore->new(qw/Glib::String Glib::String Glib::String Glib::String/);
     $self->{tree_view} = Gtk2::TreeView->new($self->{model});
+
+    my $selection = $self->{tree_view}->get_selection;
+    $selection->set_mode('multiple');
+
     $self->{toolbar} = Gtk2::Toolbar->new();
     $self->{statusbar} = Gtk2::Statusbar->new();
     $self->{entry} = Gtk2::Entry->new();
@@ -80,12 +83,33 @@ sub new {
 	      $gis->get_selected_layer();
 	  }, $self);
     
+    $self->{overlay}->set_draw_on 
+	( sub {
+	    my($gis, $pixmap) = @_;
+	    my $overlay = $gis->{overlay};
+	    my $layer = $gis->get_selected_layer();
+	    if ($layer) {
+		my $gc = Gtk2::Gdk::GC->new($pixmap);
+		$gc->set_rgb_fg_color(Gtk2::Gdk::Color->new(65535,0,0));
+		$layer->render_selection($gc, $overlay);
+	    }
+	}, $self);
+    
     $self->{overlay}->signal_connect
-	( features_selected => 
+	( new_selection => 
 	  sub {
 	      my(undef, $gis) = @_;
+	      my $overlay = $gis->{overlay};
 	      my $layer = $gis->get_selected_layer();
-	      $layer->features_selected($gis) if $layer;
+	      if ($layer) {
+		  if ($overlay->{selection}) {
+		      $layer->select($overlay->{selecting} => $overlay->{selection});
+		  } else {
+		      $layer->select();
+		  }
+		  $overlay->update_image;
+		  $layer->open_features_dialog($self) if $layer->dialog_visible('features_dialog');
+	      }
 	  }, $self);
     
     if ($params{history}) {
@@ -177,6 +201,9 @@ sub register_function {
 # @brief Extend the capabilities
 #
 # @param params named parameters:
+# - <i>class</i> [optional] the name of the layer class. If this is
+# given, dialogs and commands are retrieved from the class with method
+# Gtk2::Ex::Geo::Layer::registration
 # - <i>dialogs</i> [optional] an object containing dialogs (a dialog master object)
 # - <i>commands</i> [optional] an anonymous hash of commands for the GUI
 # A command is defined in an anonymous hash with parameters:
@@ -186,7 +213,20 @@ sub register_function {
 #   - <i>tip</i> the tip for the command button
 #   - <i>sub</i> a reference to a subroutine to be executed
 sub register_class {
-    my($self, %params) = @_;
+    my $self = shift;
+    my %params;
+    if (@_ > 1) {
+	%params = @_;
+    } else {
+	$params{class} = shift;
+    }
+    if ($params{class}) {
+	my $sub = $params{class}.'::upgrade';
+	push @{$self->{upgrades}}, \&$sub if defined &$sub;
+	$sub = $params{class}.'::registration';
+	my $registration = &$sub($params{class});
+	%params = %$registration;
+    }
     $self->register_dialogs($params{dialogs}) if $params{dialogs};
     $self->register_commands($params{commands}) if $params{commands};
 }
@@ -220,21 +260,15 @@ sub close {
 	    croak "$!: $self->{resources_file}";
 	}
     }
-    if ($self->{dialogs}) {
-	for my $dialogs (@{$self->{dialogs}}) {
-	    #$dialogs->close;
-	}
+    for my $layer (@{$self->{overlay}->{layers}}) {
+	$layer->destroy_dialogs;
     }
     delete $self->{dialogs};
-    delete $self->{statusbar};
-    delete $self->{toolbar};
-    $self->{entry}->destroy;
-    delete $self->{entry};
-    $self->{tree_view}->destroy;
-    delete $self->{tree_view};
     $self->{overlay}->close;
-    $self->{overlay}->destroy;
-    delete $self->{overlay};
+    for ('inspect_dialog', 'statusbar', 'toolbar', 'entry', 'tree_view', 'overlay') {
+	#$self->{$_}->destroy if $self->{$_}; there is no GladeXML->destroy
+	delete $self->{$_};
+    }
 }
 
 ## @method scalar get_dialog(name)
@@ -280,7 +314,8 @@ sub overlay_menu {
 	     nr => 3,
 	     sub => sub {
 		 my ($item, $self) = @_;
-		 $self->zoom_to(@{$self->{previous_zoom}});
+		 my $zoom = pop @{$self->{zoom_stack}};
+		 $self->zoom(@$zoom, 0, 1) if $zoom;
 	     },
 	 },
 	 4 => {
@@ -359,21 +394,15 @@ sub overlay_menu {
 	 'Reselect' => {
 	     nr => 16,
 	     sub => sub { my ($item, $self) = @_;
-		   my $layer = $self->selected_layer();
-		   if ($layer and $self->{selection}) {
-		       $layer->select() unless $self->{_control_down};
-		       $layer->select($self->{selecting} => $self->{selection});
-		       $self->update_image;
-		       $self->signal_emit('features_selected');
-		   }
-	       },
+			  $self->signal_emit('new_selection');
+		      }
 	 },
 	 '_Clear selection' => {
 	     nr => 17,
 	     sub => sub { my ($item, $self) = @_;
 		   if ($self->{selection}) {
 		       delete $self->{selection};
-		       $self->update_image;
+		       $self->signal_emit('new_selection');
 		   }
 	       },
 	 },
@@ -494,20 +523,73 @@ sub overlay_menu {
 sub layer_menu {
     my($tv, $event, $self) = @_;
 
-    my @res = $self->{tree_view}->get_path_at_pos($event->x,$event->y);
-    return unless defined $res[0];
-    $self->{tree_view}->set_cursor(Gtk2::TreePath->new($res[0]->to_string));
+    my $layer;
+    my @layers;
+    my $column;
 
-    my $layer = $self->{overlay}->get_layer_by_index($res[0]->to_string); 
-    return unless $layer;
+    my $selection = $self->{tree_view}->get_selection;
+    my @rows = $selection->get_selected_rows;
 
-    my $column = $res[1]->get_title;
+    if (@rows < 2) {
+	my @res = $self->{tree_view}->get_path_at_pos($event->x, $event->y);
+	return unless defined $res[0];
+	$self->{tree_view}->set_cursor(Gtk2::TreePath->new($res[0]->to_string));
+	$layer = $self->{overlay}->get_layer_by_index($res[0]->to_string);
+	return unless $layer;
+	$column = $res[1]->get_title;
+    } else {
+	for my $r (@rows) {
+	    $layer = $self->{overlay}->get_layer_by_index($r->to_string);
+	    push @layers, $layer;
+	}
+	$column = '';
+    }
     
     if ($event->button == 3) {
 
 	my $hide = $layer->visible() ? '_Hide' : '_Show';
-	my %items = 
-	    ( '_Zoom to' => 
+	
+	my %items = @layers ?
+	    ( '_Hide' => 
+	      {
+		  nr => 4,
+		  sub => sub {
+		      my($layers, $self) = @{$_[1]};
+		      for my $layer (@$layers) {
+			  $layer->visible(0);
+		      }
+		      $self->update;
+		      $self->{overlay}->render;
+		  }
+	      },
+	      '_Show' => 
+	      {
+		  nr => 4,
+		  sub => sub {
+		      my($layers, $self) = @{$_[1]};
+		      for my $layer (@$layers) {
+			  $layer->visible(1);
+		      }
+		      $self->update;
+		      $self->{overlay}->render;
+		  }
+	      },
+	      '_Remove' =>
+	      {
+		  nr => 5,
+		  sub => sub {
+		      my($layers, $self) = @{$_[1]};
+		      for my $layer (@$layers) {
+			  $self->{model}->remove($layer->{_tree_index});
+			  $self->{overlay}->remove_layer_by_name($layer->name);
+		      }
+		      $self->{overlay}->render;
+		  }
+	      }
+	      ) 
+	    :
+	    ( 
+	      '_Zoom to' => 
 	      {
 		  nr => 1,
 		  sub => sub {
@@ -552,9 +634,10 @@ sub layer_menu {
 	      );
 
 	# add items from the layer classes
-	$layer->menu_items(\%items);
+	$layer->menu_items(\%items) unless @layers;
 
 	my $menu = Gtk2::Menu->new;
+	my $params = @layers ? [\@layers, $self] : [$layer, $self];
 	$i = 0;
 	for $cmd (sort {$items{$a}{nr} <=> $items{$b}{nr}} keys %items ) {
 	    my $item;
@@ -562,7 +645,7 @@ sub layer_menu {
 		$item = Gtk2::SeparatorMenuItem->new();
 	    } else {
 		$item = Gtk2::MenuItem->new($cmd);
-		$item->signal_connect(activate => $items{$cmd}{sub}, [$layer, $self]);
+		$item->signal_connect(activate => $items{$cmd}{sub}, $params);
 	    }
 	    $item->show;
 	    $menu->append($item);
@@ -651,14 +734,14 @@ sub inspect {
 	  title => $name,
 	  dumper_setup => {} );
 
-    $treedumper->modify_font(Gtk2::Pango::FontDescription->from_string ('monospace'));
-    $treedumper->collapse_all;
+    $treedumper->{tree_view}->modify_font(Gtk2::Pango::FontDescription->from_string ('monospace'));
+    $treedumper->{tree_view}->collapse_all;
 
     my $scroller = $dialog->get_widget('inspect_scrolledwindow');
-    $scroller->remove($self->{treedumper}) if $self->{treedumper};
+    $scroller->remove($self->{treedumper}->{tree_view}) if $self->{treedumper};
 
     $self->{treedumper} = $treedumper;
-    $scroller->add($treedumper);
+    $scroller->add($treedumper->{tree_view});
 
     $dialog->get_widget('inspect_dialog')->show_all;
     $dialog->get_widget('inspect_dialog')->present;
@@ -691,7 +774,7 @@ sub set_layer {
 
     $visible = $layer->visible ? 'X' : ' ';
 
-    $self->{model}->set ($layer->{iterator},
+    $self->{model}->set ($layer->{_tree_index},
 			 0, $layer->name(),
 			 1, $type,
 			 2, $visible,
@@ -699,35 +782,52 @@ sub set_layer {
 			 );
 }
 
-## @method add_layer($layer, $name, $do_not_zoom_to)
+## @method Gtk2::Ex::Geo::Layer add_layer($layer, $name, $do_not_zoom_to)
 # @brief adds $layer with $name to overlay and model
 # The default behavior is to zoom to the new layer.
-# Geo::Raster is upgraded to Gtk2::Ex::Geo::Raster
-# Geo::Vector is upgraded to Gtk2::Ex::Geo::Vector
+# Geo::Raster is upgraded to Geo::Raster::Layer
+# Geo::Vector is upgraded to Geo::Vector::Layer
+# @param layer a Gtk2::Ex::Geo::Layer object
+# @param name [optional] a name for the layer
+# @param do_not_zoom_to [optional] the overlay is zoomed to the added
+# layer unless this is defined
+# @return
 sub add_layer {
     my($self, $layer, $name, $do_not_zoom_to) = @_;
     return unless $layer;
-    
-    # upgrades
-    if (ref($layer) eq 'Geo::Raster') {
-	bless($layer, 'Gtk2::Ex::Geo::Raster');
-	$layer->defaults();
-    } elsif (ref($layer) eq 'Geo::Vector') {
-	bless($layer, 'Gtk2::Ex::Geo::Vector');
-	$layer->defaults();
+
+    for $upgrade (@{$self->{upgrades}}) {
+	$layer = $upgrade->($layer);
     }
 
     croak "can add only Gtk2::Ex::Geo::Layer objects" unless isa($layer, 'Gtk2::Ex::Geo::Layer');
 
-    my $i = $self->{overlay}->index_of_layer($name);
+    my $i = $self->{overlay}->index_of_layer($name) if defined $name;
     croak "layer with name $name already exists" if defined $i;
 
     $name = $layer->name unless defined $name;
     $layer->defaults(name => $name);
-    $layer->{iterator} = $self->{model}->insert (undef, 0);
+    $layer->{_tree_index} = $self->{model}->insert (undef, 0);
  
     $self->set_layer($layer);
     $self->{overlay}->add_layer($layer,$do_not_zoom_to);
+    return $layer;
+}
+
+## @method Gtk2::Ex::Geo::Layer layer($name)
+# @param name
+# @return
+sub layer {
+    my($self, $name) = @_;
+    return $self->{overlay}->get_layer_by_name($name);
+}
+
+## @method layers
+# @return a list of all layers (not the internal list but a copy)
+sub layers {
+    my($self) = @_;
+    my @a = @{$self->{overlay}->{layers}};
+    return @a;
 }
 
 ## @method get_focal($name)
@@ -776,7 +876,7 @@ sub move_down {
     my $n = $#{$self->{overlay}->{layers}};
     if ($index < $n) {
 	my($layer1,$layer2) = swap($self->{overlay}->{layers},$n-$index,$n-$index-1);
-	$self->{model}->move_after($layer1->{iterator},$layer2->{iterator});
+	$self->{model}->move_after($layer1->{_tree_index},$layer2->{_tree_index});
 	$self->{overlay}->render;
     }
 
@@ -793,7 +893,7 @@ sub move_up {
     my $n = $#{$self->{overlay}->{layers}};
     if ($index > 0) {
 	my($layer1,$layer2) = swap($self->{overlay}->{layers},$n-$index,$n-$index+1);
-	$self->{model}->move_before($layer1->{iterator},$layer2->{iterator});
+	$self->{model}->move_before($layer1->{_tree_index},$layer2->{_tree_index});
 	$self->{overlay}->render;
     }
 
@@ -806,7 +906,7 @@ sub remove_layer {
     my($self, $name) = @_;
     my $layer = $self->{overlay}->get_layer_by_name($name);
     return unless $layer;
-    $self->{model}->remove($layer->{iterator});
+    $self->{model}->remove($layer->{_tree_index});
     $self->{overlay}->remove_layer_by_name($name);
     $self->{overlay}->render;
 }
@@ -821,7 +921,7 @@ sub delete_selected {
     my $n = $#{$self->{overlay}->{layers}};
     if ($index >= 0 and $index <= $n) {
 	my($layer) = splice(@{$self->{overlay}->{layers}},$n-$index,1);
-	$self->{model}->remove($layer->{iterator});
+	$self->{model}->remove($layer->{_tree_index});
 	if ($n > 0) {
 	    $index-- if $index == $n;
 	    $self->{tree_view}->set_cursor(Gtk2::TreePath->new($index));
@@ -838,7 +938,7 @@ sub get_selected_layer {
     my($path, $focus_column) = $self->{tree_view}->get_cursor;
     return unless $path;
     my $index = $path->to_string;
-    return $self->{overlay}->selected_layer($index);
+    return $self->{overlay}->get_layer_by_index($index);
 }
 
 ## @method select_layer($name)
@@ -898,7 +998,7 @@ sub eval_entry {
 		$_gd[$i]->value_range() if ref($_gd[$i]) =~ /Raster/;
 	    } else {
 		eval "\$self->add_layer(\$$g[$i],'$g[$i]',1) if ".
-		    "isa(\$$g[$i], 'Gtk2::Ex::Geo::Layer') or isa(\$$g[$i], 'Geo::Raster');"
+		    "isa(\$$g[$i], 'Gtk2::Ex::Geo::Layer') or isa(\$$g[$i], 'Geo::Raster') or isa(\$$g[$i], 'Geo::Vector');"
 		    if $g[$i] and $g[$i] ne 'self';
 	    }
 	}

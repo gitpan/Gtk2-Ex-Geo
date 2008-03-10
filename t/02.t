@@ -1,4 +1,8 @@
 use Test::More tests => 1;
+use Geo::Raster;
+use Geo::Vector;
+use Gtk2;
+
 eval {
     require IPC::Gnuplot;
 };
@@ -9,8 +13,6 @@ BEGIN {
 
 exit unless $ENV{GUI};
 
-use Gtk2;
-
 Gtk2->init;
 Glib->install_exception_handler(\&Gtk2::Ex::Geo::exception_handler);
 
@@ -18,12 +20,8 @@ Glib->install_exception_handler(\&Gtk2::Ex::Geo::exception_handler);
     package Gtk2::Ex::Geo::Test;
     our @ISA = qw(Gtk2::Ex::Geo::Layer);
     sub new {
-	my($package) = @_;
-	my $self = Gtk2::Ex::Geo::Layer::new($package);
+	my $self = Gtk2::Ex::Geo::Layer::new(@_);
 	return $self;
-    }
-    sub name {
-	'test';
     }
     sub world {
 	return (0, 0, 100, 100);
@@ -33,8 +31,8 @@ Glib->install_exception_handler(\&Gtk2::Ex::Geo::exception_handler);
     }
 }
 
-my @r = (Gtk2::Ex::Geo::Layer::registration());
-my($window, $gis) = Gtk2::Ex::Geo::simple(registrations => \@r);
+my($window, $gis) = Gtk2::Ex::Geo::simple
+	(classes => [qw/Gtk2::Ex::Geo::Layer Geo::Vector::Layer Geo::Raster::Layer/]);
 
 if ($have_gnuplot) {
     my $gnuplot = IPC::Gnuplot->new();
@@ -42,8 +40,16 @@ if ($have_gnuplot) {
     $gis->register_function( name => 'p', object => $gnuplot );
 }
 
-my $layer = Gtk2::Ex::Geo::Test->new();
+my $layer = Gtk2::Ex::Geo::Test->new(name => 'test 1');
 $gis->add_layer($layer);
+
+$layer = Gtk2::Ex::Geo::Test->new(name => 'test 2');
+$gis->add_layer($layer);
+
+$gis->{overlay}->signal_connect(update_layers => 
+	sub {
+	#print STDERR "in callback: @_\n";
+	});
 
 $gis->register_commands
     ( 
@@ -54,7 +60,6 @@ $gis->register_commands
 	      pos => -1,
 	      sub => sub {
 		  my(undef, $gui) = @_;
-		  print STDERR "test command\n";
 	      }
 	  }
       } );

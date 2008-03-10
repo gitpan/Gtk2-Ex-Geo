@@ -13,12 +13,14 @@ use base 'Gtk2::TreeView';
 sub new {
 	my $class = shift;
 	my %args = (data => undef, @_);
-	my $self = bless Gtk2::TreeView->new, $class;
-	$self->insert_column_with_attributes
-			(0, 'Data', Gtk2::CellRendererText->new, text => 0);
+	#my $self = bless Gtk2::TreeView->new, $class;
+	my $self = bless {}, $class;
+	$self->{tree_view} = bless Gtk2::TreeView->new, $class;
+	$self->{tree_view}->insert_column_with_attributes
+	    (0, 'Data', Gtk2::CellRendererText->new, text => 0);
 	$self->set_data ($args{data}) if exists $args{data};
 	$self->set_title ($args{title});
-	$self->signal_connect (button_press_event => sub {
+	$self->{tree_view}->signal_connect (button_press_event => sub {
 		my ($widget, $event) = @_;
 		if ($event->button == 3) {
 			_do_context_menu ($widget, $event);
@@ -45,41 +47,43 @@ sub _do_context_menu {
 }
 
 sub _fill_scalar {
-	my ($model, $parent, $name, $data) = @_;
+	my ($self, $model, $parent, $name, $data) = @_;
 	my $str = defined ($data) ? "$data" : "[undef]";
 	$model->set ($model->append ($parent),
 		     0, (defined($name) ? "$name " : ''). $str);
 }
 
 sub _fill_array {
-	my ($model, $parent, $name, $ref) = @_;
+	my ($self, $model, $parent, $name, $ref) = @_;
 	my $iter = $model->append ($parent);
 	my $refstr = "$ref" . (@$ref ? '' : ' [empty]');
 	$model->set ($iter, 0, defined($name) ? "$name $refstr" : "$refstr");
 	for (my $i = 0; $i < @$ref; $i++) {
-		_fill_recursive ($model, $iter, "[$i] =", $ref->[$i]);
+		_fill_recursive ($self, $model, $iter, "[$i] =", $ref->[$i]);
 	}
 }
 
 sub _fill_hash {
-	my ($model, $parent, $name, $ref) = @_;
+	my ($self, $model, $parent, $name, $ref) = @_;
 	my $iter = $model->append ($parent);
 	my $refstr = "$ref" . (%$ref ? '' : ' [empty]');
 	$model->set ($iter, 0, defined($name) ? "$name $refstr" : "$refstr");
 	foreach my $key (sort keys %$ref) {
-		_fill_recursive ($model, $iter, "$key =>", $ref->{$key});
+		_fill_recursive ($self, $model, $iter, "$key =>", $ref->{$key});
 	}
 }
 
 sub _fill_recursive {
-	my ($model, $parent, $name, $ref) = @_;
+	my ($self, $model, $parent, $name, $ref) = @_;
+	return if $self->{data}{$ref};
+	$self->{data}{$ref} = 1;
 
 	if (UNIVERSAL::isa $ref, 'HASH') {
-		_fill_hash ($model, $parent, $name, $ref);
+		_fill_hash ($self, $model, $parent, $name, $ref);
 	} elsif (UNIVERSAL::isa $ref, 'ARRAY') {
-		_fill_array ($model, $parent, $name, $ref);
+		_fill_array ($self, $model, $parent, $name, $ref);
 	} else {
-		_fill_scalar ($model, $parent, $name, $ref);
+		_fill_scalar ($self, $model, $parent, $name, $ref);
 	}
 }
 
@@ -88,19 +92,19 @@ sub set_data {
 
 	my $model = Gtk2::TreeStore->new ('Glib::String');
 
-	_fill_recursive ($model, undef, undef, $data);
+	_fill_recursive ($self, $model, undef, undef, $data);
 
-	$self->set_model ($model);
+	$self->{tree_view}->set_model ($model);
 }
 
 sub set_title {
 	my ($self, $title) = @_;
 
 	if (defined $title and length $title) {
-		$self->get_column (0)->set_title ($title);
-		$self->set_headers_visible (TRUE);
+		$self->{tree_view}->get_column (0)->set_title ($title);
+		$self->{tree_view}->set_headers_visible (TRUE);
 	} else {
-		$self->set_headers_visible (FALSE);
+		$self->{tree_view}->set_headers_visible (FALSE);
 	}
 }
 

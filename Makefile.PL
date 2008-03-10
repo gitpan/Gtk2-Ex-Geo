@@ -1,30 +1,26 @@
 use 5.005;
 use Config;
+use ExtUtils::MakeMaker;
 
 my %missing_modules;
 
-$missing_modules{chk_module('ExtUtils::MakeMaker')} = 1;
 $missing_modules{chk_module('ExtUtils::Depends')} = 1;
 $missing_modules{chk_module('ExtUtils::PkgConfig')} = 1;
 $missing_modules{chk_module('Gtk2::GladeXML')} = 1;
-$missing_modules{chk_module('Data::TreeDumper')} = 1;
 $missing_modules{chk_module('Graphics::ColorUtils')} = 1;
 $missing_modules{chk_module('Geo::OGC::Geometry')} = 1;
-delete $missing_modules{''};
 
-my $have_libral = 1;
+delete $missing_modules{''};
 
 my @missing_modules = keys %missing_modules;
 warn "Following required modules are missing: @missing_modules\n" if @missing_modules;
 
-use ExtUtils::MakeMaker;
-use ExtUtils::Depends;
-use ExtUtils::PkgConfig;
+require ExtUtils::Depends;
+require ExtUtils::PkgConfig;
 
 my($inc,$libs,$cflags) = ('','','');
 
 my @packages = ('gdk-pixbuf-2.0');
-push @packages, ('gdal', 'libral') if $have_libral;
 
 for $package (@packages) {
     print "Checking for $package: ";
@@ -80,9 +76,8 @@ if ($^O eq 'MSWin32') {
 		    dynamic_lib=>{OTHERLDFLAGS=>"-Wl,--out-implib=blib\\arch\\auto\\Gtk2\\Ex\\Geo.dll.a "});
 }
 
+$deps->install (qw(lib/Gtk2/Ex/gtk2-ex-geo.h));
 $deps->save_config ('Files.pm');
-
-my $define = $have_libral ? '-DHAVE_RAL' : '';
 
 WriteMakefile(
 	      NAME              => 'Gtk2::Ex::Geo',
@@ -96,7 +91,6 @@ WriteMakefile(
 		) : 
 	       ()
 	       ),
-	      DEFINE => $define,
 	      CCFLAGS => $cflags,
 	      $deps->get_makefile_vars,
 	      @for_windows
@@ -184,6 +178,6 @@ sub ExtUtils::Depends::_find_extra_libs {
 				if /$m.dll.a/ or /lib$m.dll.a/;
 		}, @INC);
 	}
-       print "$retstring\n";
+	#print "$retstring\n";
 	return $retstring;
 }

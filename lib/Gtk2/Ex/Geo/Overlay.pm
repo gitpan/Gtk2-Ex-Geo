@@ -14,7 +14,7 @@ use Carp;
 use Glib qw/TRUE FALSE/;
 use Geo::OGC::Geometry;
 
-our $VERSION = '0.55'; # same as Geo.pm
+our $VERSION = '0.56'; # same as Geo.pm
 
 =pod
 
@@ -38,10 +38,12 @@ my %visual_keys = ($Gtk2::Gdk::Keysyms{plus}=>1,
 use Glib::Object::Subclass
     Gtk2::ScrolledWindow::,
     signals => {
-	features_selected => {},
-	zoomed_in => {},
-	extent_widened => {},
-	motion_notify => {},
+	update_layers => {}, # sent just before the layers are rendered
+	new_selection => {}, # sent after attribute {selection} has changed
+	zoomed_in => {},     # deprecated
+	extent_changed => {},# deprecated
+	motion_notify => {}, # the mouse has a new location on the map
+	map_updated => {},   # deprecated
     },
     properties => 
     [
@@ -121,12 +123,9 @@ sub size_allocate {
 sub my_inits {
     my($self, %params) = @_;
     $self->{inited} = 1;
-    
-    my $hs = $self->get_hscrollbar();
-    my $vs = $self->get_vscrollbar();
 
-    $hs->signal_connect("value-changed" => \&value_changed, $self);
-    $vs->signal_connect("value-changed" => \&value_changed, $self);
+    $self->get_hscrollbar()->signal_connect(value_changed => \&value_changed, $self);
+    $self->get_vscrollbar()->signal_connect(value_changed => \&value_changed, $self);
     
     $self->add_with_viewport($self->{event_box});
 
@@ -155,16 +154,6 @@ sub add_layer {
     }
     $self->{first_added} = 1;
     return $#{$self->{layers}};
-}
-
-## @method selected_layer($index)
-# @brief Get or set the selected layer.
-sub selected_layer {
-    my($self, $index) = @_;
-    if (defined $index) {
-	$self->{_selected} = $self->get_layer_by_index($index);
-    }
-    return $self->{_selected};
 }
 
 ## @method layer_count()
@@ -219,7 +208,6 @@ sub remove_layer_by_index {
     my $n = $#{$self->{layers}};
     return 0 unless $index >= 0 and $index <= $n;
     splice(@{$self->{layers}}, $n-$index, 1);
-    delete $self->{_selected} unless $self->has_layer($self->{_selected});
     return 1;
 }
 
@@ -229,7 +217,6 @@ sub remove_layer_by_name {
     for my $index (0..$#{$self->{layers}}) {
 	if ($self->{layers}->[$index]->name() eq $name) {
 	    splice(@{$self->{layers}}, $index, 1);
-	    delete $self->{_selected} unless $self->has_layer($self->{_selected});
 	    return 1;
 	}
     }    
@@ -245,6 +232,9 @@ sub zoom_to {
     my $self = shift;
 
     # up left (minX, maxY) is fixed, adjust maxX or minY
+    delete $self->{zoom_stack};
+
+    my @vp1 = $self->get_viewport;
 
     my @bounds; # minX, minY, maxX, maxY
 
@@ -274,6 +264,7 @@ sub zoom_to {
     my($w, $h) = @{$self->{viewport_size}};
     @{$self->{canvas_size}} = @{$self->{viewport_size}};
     $self->{pixel_size} = max(($bounds[2]-$bounds[0])/$w,($bounds[3]-$bounds[1])/$h);
+    push @{$self->{zoom_stack}}, [@{$self->{offset}}, $self->{pixel_size}];
 
     $self->{minX} = $bounds[0];
     $self->{maxY} = $bounds[3];
@@ -281,7 +272,13 @@ sub zoom_to {
     $self->{minY} = $bounds[3]-$self->{pixel_size}*$h;
 
     $self->render() if $self->{first_added};
-    $self->signal_emit('extent-widened');
+
+    my @vp2 = $self->get_viewport;
+    if (!@vp1 or ($vp2[0] >= $vp1[0] and $vp2[1] >= $vp1[1] and $vp2[2] <= $vp1[2] and $vp2[3] <= $vp1[3])) {
+	$self->signal_emit('zoomed-in');
+    } else {
+	$self->signal_emit('extent-changed');
+    }
 }
 
 ## @method get_world
@@ -297,6 +294,7 @@ sub get_world {
 # @return (min_x, min_y, max_x, max_y)
 sub get_viewport {
     my $self = shift;
+    return () unless defined $self->{minX};
     my $minX = $self->{minX}+$self->{offset}[0]*$self->{pixel_size};
     my $maxY = $self->{maxY}-$self->{offset}[1]*$self->{pixel_size};
     return ( $minX, $maxY-$self->{viewport_size}->[1]*$self->{pixel_size},
@@ -317,7 +315,7 @@ sub get_viewport_of_selection {
 
 ## @method size
 # @brief The size of the viewport in pixels (height, width)
-sub size { # similar to Geo::Raster (M, N) i.e. height, width)
+sub size {
     my $self = shift;
     return ($self->{viewport_size}->[1], $self->{viewport_size}->[0]);
 }
@@ -356,8 +354,10 @@ sub set_draw_on {
 
 ## @ignore
 sub value_changed {
-    my($scrollbar, $self) = @_;
+    my(undef, $self) = @_;
+    push @{$self->{zoom_stack}}, [@{$self->{offset}}, $self->{pixel_size}];
     $self->{offset} = [$self->get_hadjustment()->value(), $self->get_vadjustment()->value()];
+    $self->signal_emit('extent-changed'); 
     $self->render();
     return 1;
 }
@@ -384,39 +384,37 @@ sub get_focus {
     package Gtk2::Ex::Geo::Canvas;
     our @ISA = qw(Gtk2::Gdk::Pixbuf);
  
-   sub new {
-       my($class, $layers, 
-	  $minX, $maxY, $pixel_size, $w_offset, $h_offset,
-	  $width, $height,
-	  $bg_r, $bg_g, $bg_b, $overlay) = @_;
-       
-       return unless defined $minX;
-       
-       my @viewport = ($minX+$pixel_size*$w_offset, 0, 0, $maxY-$pixel_size*$h_offset);
-       $viewport[2] = $viewport[0]+$pixel_size*$width;
-       $viewport[1] = $viewport[3]-$pixel_size*$height;
-       
-       my $pb = &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_create($width, $height,
-							  $viewport[0], $viewport[3],
-							  $pixel_size, 
-							  $bg_r, $bg_g, $bg_b);
-       
-       my $surface = &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_get_cairo_surface($pb);
-       my $cr = Cairo::Context->create($surface);
-       
-       for my $layer (@$layers) {
-	   $layer->render($pb, $cr, $overlay, \@viewport);
-       }
-       
-       undef $cr;
-       undef $surface;
-       
-       my $self = &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_get_pixbuf($pb);
-       
-       &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_destroy($pb); # does not delete the real pixbuf
-       
-       bless($self, $class); 
-   }
+    sub new {
+	my($class, $layers, 
+	   $minX, $maxY, $pixel_size, $w_offset, $h_offset,
+	   $width, $height,
+	   $bg_r, $bg_g, $bg_b, $overlay) = @_;
+	
+	return unless defined $minX;
+	
+	my @viewport = ($minX+$pixel_size*$w_offset, 0, 0, $maxY-$pixel_size*$h_offset);
+	$viewport[2] = $viewport[0]+$pixel_size*$width;
+	$viewport[1] = $viewport[3]-$pixel_size*$height;
+	
+	my $pb = &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_create($width, $height,
+							   $viewport[0], $viewport[3],
+							   $pixel_size, 
+							   $bg_r, $bg_g, $bg_b);
+	
+	my $surface = &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_get_cairo_surface($pb);
+	my $cr = Cairo::Context->create($surface);
+	
+	for my $layer (@$layers) {
+	    $layer->render($pb, $cr, $overlay, \@viewport);
+	}
+	
+	undef $cr;
+	undef $surface;
+	my $self = &Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_get_pixbuf($pb);
+	&Gtk2::Ex::Geo::gtk2_ex_geo_pixbuf_destroy($pb); # does not delete the real pixbuf
+	
+	bless($self, $class); 
+    }
 }
 
 ## @method render(%params)
@@ -435,15 +433,14 @@ sub render {
     my $self = shift;
     my %opt = @_;
 
-    return unless $self->{layers} and @{$self->{layers}} and $self->{viewport_size}->[0];
+    return unless $self->{viewport_size}->[0];
+
+    $self->signal_emit('update-layers');
 
     my @tmp = ($self->{minX}, $self->{maxY}, $self->{pixel_size}, @{$self->{offset}});
-    $self->{previous_zoom} = $self->{current_zoom} ? [@{$self->{current_zoom}}] : [@tmp];
-    $self->{current_zoom} = [@tmp];
+    $self->{pixbuf} = Gtk2::Ex::Geo::Canvas->new
+	($self->{layers}, @tmp, @{$self->{viewport_size}}, @{$self->{bg_color}}, $self);
 
-    $self->{pixbuf} = Gtk2::Ex::Geo::Canvas->new($self->{layers}, @tmp, 
-						   @{$self->{viewport_size}},
-						   @{$self->{bg_color}}, $self);
     return unless $self->{pixbuf};
 
     if ($opt{filename}) {
@@ -453,6 +450,7 @@ sub render {
 	delete $opt{type};
 	# other options...
 	$self->{pixbuf}->save($filename, $type);
+	return;
     }
 
     $self->update_image();
@@ -466,6 +464,8 @@ sub render {
     $self->get_vscrollbar->set_adjustment
 	(Gtk2::Adjustment->new($self->{offset}[1], 0, $self->{canvas_size}[1], $self->{viewport_size}[1]/20,
 			       $self->{viewport_size}[1], $self->{viewport_size}[1]));
+
+    $self->signal_emit ('map-updated');
 
 }
 
@@ -528,12 +528,6 @@ sub reset_image {
 sub update_image {
     my($self) = @_;
     $self->reset_pixmap;
-    my $layer = $self->selected_layer;
-    if ($layer) {
-	my $gc = Gtk2::Gdk::GC->new($self->{pixmap});
-	$gc->set_rgb_fg_color(Gtk2::Gdk::Color->new(65535,0,0));
-	$layer->render_selection($gc, $self);
-    }
     $self->{draw_on}->($self->{draw_on_user_param}, $self->{pixmap}) if $self->{draw_on};
     $self->reset_image;
 }
@@ -541,7 +535,9 @@ sub update_image {
 ## @method zoom($w_offset, $h_offset, $pixel_size)
 # @brief Select a part of the world into the visible area.
 sub zoom {
-    my($self, $w_offset, $h_offset, $pixel_size, $zoomed_in) = @_;
+    my($self, $w_offset, $h_offset, $pixel_size, $zoomed_in, $not_to_stack) = @_;
+
+    push @{$self->{zoom_stack}}, [@{$self->{offset}}, $self->{pixel_size}] unless $not_to_stack;
 
     $self->{offset} = [$w_offset, $h_offset];
     
@@ -556,9 +552,9 @@ sub zoom {
 
     $self->render();
     if ($zoomed_in) {
-	$self->signal_emit ('zoomed-in');
+	$self->signal_emit('zoomed-in');
     } else {
-	$self->signal_emit ('extent-widened');
+	$self->signal_emit('extent-changed');
     }
 }
 
@@ -623,11 +619,12 @@ sub pan {
     $self->{event_coordinates}[0] += $w_move;
     $self->{event_coordinates}[1] += $h_move;
 
+    push @{$self->{zoom_stack}}, [@{$self->{offset}}, $self->{pixel_size}];
     $self->{offset} = [$self->{offset}[0] + $w_move, $self->{offset}[1] + $h_move];
 	
     $self->render();
     
-    $self->signal_emit ('extent-widened');
+    $self->signal_emit('extent-changed');
 }
 
 ## @method key_press_event($event)
@@ -697,24 +694,26 @@ sub key_press_event {
 sub key_release_event {
     my($self, $event) = @_;
     my $key = $event->keyval;
-    $self->{_control_down} = 0 if $Gtk2::Gdk::Keysyms{Control_L} or $Gtk2::Gdk::Keysyms{Control_R};
+    if ($key == $Gtk2::Gdk::Keysyms{Control_L} or 
+	$key == $Gtk2::Gdk::Keysyms{Control_R}) {
+	$self->{_control_down} = 0;
+    }
 }
 
 sub add_to_selection {
     my($self, $geom) = @_;
-    my $layer = $self->selected_layer();
     if ($self->{_control_down}) {
-	unless (isa($self->{selection}, 'Geo::OGC::GeometryCollection')) {
+	if (!$self->{selection} or
+	    !isa($self->{selection}, 'Geo::OGC::GeometryCollection')) {
 	    my $coll = Geo::OGC::GeometryCollection->new;
-	    $coll->AddGeometry($self->{selection});
+	    $coll->AddGeometry($self->{selection}) if $self->{selection};
 	    $self->{selection} = $coll;
 	}
 	$self->{selection}->AddGeometry($geom) if $geom;
     } else {
 	$self->{selection} = $geom;
     }
-    $layer->select($self->{selecting} => $self->{selection}) if $layer and $self->{selection};
-    $self->signal_emit('features_selected');
+    $self->signal_emit('new_selection');
 }
 
 ## @method button_press_event()
@@ -754,7 +753,10 @@ sub button_press_event {
 	$self->{rubberband_gc}->copy($self->style->fg_gc($self->state));
 	$self->{rubberband_gc}->set_function('invert');
 
-	delete $self->{selection} if $self->{rubberband_mode} eq 'select' and !$self->{_control_down};
+	if (($self->{rubberband_mode} eq 'select' and !$self->{_control_down})) {
+	    delete $self->{selection};
+	    $self->signal_emit('new_selection');
+	}
 
 	$handled = 1;
 
@@ -856,6 +858,8 @@ sub button_release_event {
 		    $self->delete_rubberband;
 		} elsif ($self->{rubberband_geometry} eq 'ellipse') {
 		    $self->delete_rubberband;
+		} elsif ($self->{rubberband_geometry} eq 'path') {
+		    delete $self->{rubberband};
 		}
 	    }
 	}
