@@ -14,7 +14,7 @@ use Carp;
 use Glib qw/TRUE FALSE/;
 use Geo::OGC::Geometry;
 
-our $VERSION = '0.57'; # same as Geo.pm
+our $VERSION = '0.58'; # same as Geo.pm
 
 =pod
 
