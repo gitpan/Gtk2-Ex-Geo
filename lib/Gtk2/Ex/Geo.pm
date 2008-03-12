@@ -119,12 +119,11 @@ use Gtk2::Ex::Geo::DialogMaster;
 use Gtk2::Ex::Geo::Glue;
 
 BEGIN {
-    use Exporter "import";
-    our @ISA = qw(Exporter);
+    use Exporter 'import';
     our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
     our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
     our @EXPORT = qw( );
-    our $VERSION = '0.58';
+    our $VERSION = '0.60';
     XSLoader::load( 'Gtk2::Ex::Geo', $VERSION );
 }
 

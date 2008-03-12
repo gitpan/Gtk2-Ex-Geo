@@ -11,6 +11,13 @@ use strict;
 use warnings;
 use Carp;
 
+BEGIN {
+    use Exporter 'import';
+    our @EXPORT = qw();
+    our @EXPORT_OK = qw();
+    our %EXPORT_TAGS = ( FIELDS => [ @EXPORT_OK, @EXPORT ] );
+}
+
 =pod
 
 =head1 NAME

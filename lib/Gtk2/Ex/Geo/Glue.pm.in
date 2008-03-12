@@ -29,7 +29,7 @@ use Gtk2::Ex::Geo::Dialogs;
 use Gtk2::Ex::Geo::TreeDumper;
 
 BEGIN {
-    use Exporter "import";
+    use Exporter 'import';
     our @EXPORT = qw();
     our @EXPORT_OK = qw();
     our %EXPORT_TAGS = ( FIELDS => [ @EXPORT_OK, @EXPORT ] );

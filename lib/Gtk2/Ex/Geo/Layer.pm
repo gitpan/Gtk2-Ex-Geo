@@ -28,7 +28,7 @@ use Gtk2::Ex::Geo::Dialogs;
 use vars qw/$MAX_INT $MAX_REAL $COLOR_CELL_SIZE %PALETTE_TYPE %SYMBOL_TYPE %LABEL_PLACEMENT/;
 
 BEGIN {
-    use Exporter "import";
+    use Exporter 'import';
     our %EXPORT_TAGS = ( 'all' => [ qw(%PALETTE_TYPE %SYMBOL_TYPE %LABEL_PLACEMENT) ] );
     our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
 }

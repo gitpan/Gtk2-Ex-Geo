@@ -1,4 +1,4 @@
-use 5.005;
+use 5.008003; # support use Exporter 'import';
 use Config;
 use ExtUtils::MakeMaker;
 
@@ -10,7 +10,8 @@ $missing_modules{chk_module('ExtUtils::PkgConfig')} = 1;
 delete $missing_modules{''};
 
 my @missing_modules = keys %missing_modules;
-warn "Following required/optional modules are missing: @missing_modules\n" if @missing_modules;
+print "Following required/optional modules are missing: @missing_modules\n" if @missing_modules;
+exit 0 if @missing_modules;
 
 require ExtUtils::Depends;
 require ExtUtils::PkgConfig;
@@ -79,15 +80,8 @@ $deps->save_config ('Files.pm');
 WriteMakefile(
 	      NAME              => 'Gtk2::Ex::Geo',
 	      VERSION_FROM      => 'lib/Gtk2/Ex/Geo.pm',
-	      PREREQ_PM         => {}, # e.g., Module::Name => 1.1
-	      (
-	       $] >= 5.005 ?     ## Add these new keywords supported since 5.005
-	       (
-		ABSTRACT_FROM   => 'lib/Gtk2/Ex/Geo.pm', # retrieve abstract from module
-		AUTHOR          => 'Ari Jolma <ari.jolma @ tkk.fi>'
-		) : 
-	       ()
-	       ),
+	      ABSTRACT_FROM   => 'lib/Gtk2/Ex/Geo.pm', # retrieve abstract from module
+	      AUTHOR          => 'Ari Jolma <ari.jolma @ tkk.fi>',
 	      PREREQ_PM         => {
 		  'ExtUtils::Depends' => 0,
 		  'ExtUtils::PkgConfig' => 0,
