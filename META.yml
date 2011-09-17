@@ -1,15 +1,26 @@
-# http://module-build.sourceforge.net/META-spec.html
-#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
-name:         Gtk2-Ex-Geo
-version:      0.61
-version_from: lib/Gtk2/Ex/Geo.pm
-installdirs:  site
+--- #YAML:1.0
+name:               Gtk2-Ex-Geo
+version:            0.62
+abstract:           The main module to use for geospatial applications
+author:
+    - Ari Jolma <ari.jolma @ tkk.fi>
+license:            unknown
+distribution_type:  module
+configure_requires:
+    ExtUtils::MakeMaker:  0
+build_requires:
+    ExtUtils::MakeMaker:  0
 requires:
-    ExtUtils::Depends:             0
-    ExtUtils::PkgConfig:           0
-    Geo::OGC::Geometry:            0
-    Graphics::ColorUtils:          0
-    Gtk2::GladeXML:                0
-
-distribution_type: module
-generated_by: ExtUtils::MakeMaker version 6.30
+    ExtUtils::Depends:    0
+    ExtUtils::PkgConfig:  0
+    Geo::OGC::Geometry:   0
+    Graphics::ColorUtils:  0
+    Gtk2::GladeXML:       0
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.55_02
+meta-spec:
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4

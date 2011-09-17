@@ -34,11 +34,12 @@ for $package (@packages) {
 	$l = $pkg_info{libs};
     }
     $cflags .= " $c";
+    # hack to circumwent the fact that ExtUtils::MakeMaker does not find .dll.a libraries
     if ($^O eq "MSWin32") {
 	my @a = split /\s+/,$l;
 	for (@a) {
 	    if (/^-l/ and !(/.dll/) and !(/-lm/) and !(/^-lws2/) and !(/^-lgdi/)) {
-		$_ .= '.dll.a';
+		$_ .= '.dll';
 	    }
 	}
 	$l = join(' ',@a);
@@ -50,6 +51,9 @@ for $package (@packages) {
 our $deps = ExtUtils::Depends->new('Gtk2::Ex::Geo', 'Gtk2');
 
 our %pm_files = (
+		 'lib/Gtk2/Ex/Geo/Dialogs/Colors.pm'  => '$(INST_LIBDIR)/Geo/Dialogs/Colors.pm',
+		 'lib/Gtk2/Ex/Geo/Dialogs/Labeling.pm'=> '$(INST_LIBDIR)/Geo/Dialogs/Labeling.pm',
+		 'lib/Gtk2/Ex/Geo/Dialogs/Symbols.pm' => '$(INST_LIBDIR)/Geo/Dialogs/Symbols.pm',
 		 'lib/Gtk2/Ex/Geo/Overlay.pm'      => '$(INST_LIBDIR)/Geo/Overlay.pm',
 		 'lib/Gtk2/Ex/Geo/Glue.pm'         => '$(INST_LIBDIR)/Geo/Glue.pm',
 		 'lib/Gtk2/Ex/Geo/TreeDumper.pm'   => '$(INST_LIBDIR)/Geo/TreeDumper.pm',
@@ -61,9 +65,6 @@ our %pm_files = (
 
 $deps->add_pm (%pm_files);
 $deps->add_xs('lib/Gtk2/Ex/Geo.xs');
-if ($^O eq 'MSWin32') {
-    $libs .= $deps->_find_extra_libs;
-}
 $deps->set_libs($libs);
 
 @for_windows = ();
@@ -140,42 +141,4 @@ sub postamble {
 	}
     }
     return $ret;
-}
-
-# this probably needs to go into ExtUtils::Depends.
-sub ExtUtils::Depends::_find_extra_libs {
-	# right now we need this terrible hack only for windows.
-	return "" unless $^O eq "MSWin32";
-
-	my $self = shift;
-
-	# win32 does not allow unresolved symbols in libraries, but
-	# Gtk2 uses on symbols in the dll created for Glib.
-	# so, we have to break all this nice abstraction and encapsulation
-	# and find the actual Glib.dll and Glib.lib installed by perl when
-	# the Glib module was built, and add it to the list of lib files.
-	#
-	# say it with me: "i hate win32."
-
-	my $retstring = "";
-
-	use File::Find;
-
-	my %deps = $self->get_deps;
-	foreach my $mod (keys %deps) {
-	    print "find extra libs $mod\n";
-	    my $m = $mod;
-	    if ($m =~ /::/) {
-		my @m = split /::/, $m;
-		$m = pop @m;
-	    }
-	    print "find extra libs $m\n";
-		find (sub {
-		    print $File::Find::name,"\n" if /$m.dll.a/ or /lib$m.dll.a/;
-			$retstring .= " ".$File::Find::name
-				if /$m.dll.a/ or /lib$m.dll.a/;
-		}, @INC);
-	}
-	#print "$retstring\n";
-	return $retstring;
 }

@@ -22,7 +22,7 @@ BEGIN {
 
 =head1 NAME
 
-Gtk2::Ex::Geo::DialogMaster - A class which maintains a set of dialogs taken from __DATA__
+Gtk2::Ex::Geo::DialogMaster - A class which maintains a set of glade dialogs
 
 The <a href="http://map.hut.fi/doc/Geoinformatica/html/">
 documentation of Gtk2::Ex::Geo</a> is written in doxygen format.
@@ -41,9 +41,10 @@ sub get_dialog {
     my @buf = ('<glade-interface>');
     my $push = 0;
     for (@{$self->{buffer}}) {
-	$push = 1 if (/^<widget/ and /$dialog_name/);
+        # assumes Glade 3 style XML...
+	$push = 1 if (/^  <widget/ and /$dialog_name/);
 	push @buf, $_ if $push;
-	$push = 0 if /^<\/widget/;
+	$push = 0 if /^  <\/widget/;
     }
     push @buf, '</glade-interface>';
     my $gladexml = Gtk2::GladeXML->new_from_buffer("@buf");
