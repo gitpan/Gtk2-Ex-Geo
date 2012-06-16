@@ -21,7 +21,6 @@ use strict;
 use warnings;
 use Scalar::Util qw(blessed);
 use Carp;
-use FileHandle;
 use Glib qw /TRUE FALSE/;
 use Gtk2::Ex::Geo::Dialogs;
 use Gtk2::Ex::Geo::Dialogs::Symbols;
@@ -685,8 +684,7 @@ sub color_table {
 	}
     } else 
     {
-	my $fh = new FileHandle;
-	croak "Can't read from $color_table: $!\n" unless $fh->open("< $color_table");
+	open(my $fh, '<', $color_table) or croak "can't read from $color_table: $!";
 	$self->{COLOR_TABLE} = [];
 	while (<$fh>) {
 	    next if /^#/;
@@ -705,7 +703,7 @@ sub color_table {
 	    #print STDERR "@tokens\n";
 	    push @{$self->{COLOR_TABLE}}, \@tokens;
 	}
-	$fh->close;
+	CORE::close($fh);
     }
 }
 
@@ -770,12 +768,11 @@ sub remove_color {
 # @exception A filename is given, which can't be written to.
 sub save_color_table {
     my($self, $filename) = @_;
-    my $fh = new FileHandle;
-    croak "can't write to $filename: $!\n" unless $fh->open("> $filename");
+    open(my $fh, '>', $filename) or croak "can't write to $filename: $!";
     for my $color (@{$self->{COLOR_TABLE}}) {
 	print $fh "@$color\n";
     }
-    $fh->close;
+    CORE::close($fh);
 }
 
 ## @method @color_bins($color_bins)
@@ -804,8 +801,7 @@ sub color_bins {
 	    push @{$self->{COLOR_BINS}}, [@$_];
 	}
     } else {
-	my $fh = new FileHandle;
-	croak "can't read from $color_bins: $!\n" unless $fh->open("< $color_bins");
+	open(my $fh, '<', $color_bins) or croak "can't read from $color_bins: $!";
 	$self->{COLOR_BINS} = [];
 	while (<$fh>) {
 	    next if /^#/;
@@ -819,7 +815,7 @@ sub color_bins {
 	    }
 	    push @{$self->{COLOR_BINS}}, \@tokens;
 	}
-	$fh->close;
+	CORE::close($fh);
     }
 }
 
@@ -831,12 +827,11 @@ sub color_bins {
 # @exception A filename is given, which can't be written to.
 sub save_color_bins {
     my($self, $filename) = @_;
-    my $fh = new FileHandle;
-    croak "Can't write to $filename: $!\n" unless $fh->open("> $filename");
+    open(my $fh, '>', $filename) or croak "can't write to $filename: $!";
     for my $color (@{$self->{COLOR_BINS}}) {
 	print $fh "@$color\n";
     }
-    $fh->close;
+    CORE::close($fh);
 }
 
 ## @method hashref labeling($labeling)
@@ -1018,7 +1013,7 @@ sub render_selection {
 #
 # @brief A request to render the data of the layer onto a surface.
 #
-# @param[in,out] pb A (XS wrapped) pointer to agtk2_ex_geo_pixbuf.
+# @param[in,out] pb A (XS wrapped) pointer to a gtk2_ex_geo_pixbuf.
 # @param[in,out] cr A Cairo::Context object for the surface to draw on.
 # @param[in] overlay A Gtk2::Ex::Geo::Overlay object which manages the surface.
 # @param[in] viewport A reference to the bounding box [min_x, min_y,
@@ -1050,6 +1045,7 @@ sub render {
 # further boot up.
 sub bootstrap_dialog {
     my($self, $gui, $dialog, $title, $connects, $combos) = @_;
+    $self = {} unless $self;
     my $boot = 0;
     my $widget;
     unless ($self->{$dialog}) {

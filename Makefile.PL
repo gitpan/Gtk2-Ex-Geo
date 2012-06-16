@@ -6,6 +6,8 @@ my %missing_modules;
 
 $missing_modules{chk_module('ExtUtils::Depends')} = 1;
 $missing_modules{chk_module('ExtUtils::PkgConfig')} = 1;
+$missing_modules{chk_module('Geo::OGC::Geometry')} = 1;
+$missing_modules{chk_module('Graphics::ColorUtils')} = 1;
 
 delete $missing_modules{''};
 
@@ -16,7 +18,7 @@ exit 0 if @missing_modules;
 require ExtUtils::Depends;
 require ExtUtils::PkgConfig;
 
-my($inc,$libs,$cflags) = ('','','');
+my($inc,$libs,$cflags) = ('','',$Config{ccflags});
 
 my @packages = ('gdk-pixbuf-2.0');
 
