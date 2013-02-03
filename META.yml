@@ -1,9 +1,9 @@
 --- #YAML:1.0
 name:               Gtk2-Ex-Geo
-version:            0.63
+version:            0.64
 abstract:           The main module to use for geospatial applications
 author:
-    - Ari Jolma <ari.jolma @ tkk.fi>
+    - Ari Jolma <ari.jolma @ aalto.fi>
 license:            unknown
 distribution_type:  module
 configure_requires:
@@ -11,8 +11,6 @@ configure_requires:
 build_requires:
     ExtUtils::MakeMaker:  0
 requires:
-    ExtUtils::Depends:    0
-    ExtUtils::PkgConfig:  0
     Geo::OGC::Geometry:   0
     Graphics::ColorUtils:  0
     Gtk2::GladeXML:       0

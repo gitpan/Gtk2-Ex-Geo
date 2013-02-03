@@ -83,7 +83,7 @@ href="http://www.bigsister.ch/doxygenfilter/">perl doxygen filter</a>.
 
 The documentation is of this framework is available as a part of the
 documentation for <a
-href="http://map.hut.fi/doc/Geoinformatica/html/">Geoinformatica</a>.
+href="http://geoinformatics.aalto.fi/doc/Geoinformatica/html/">Geoinformatica</a>.
 
 =cut
 
@@ -106,7 +106,7 @@ BEGIN {
     our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
     our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
     our @EXPORT = qw( );
-    our $VERSION = '0.63';
+    our $VERSION = '0.64';
     XSLoader::load( 'Gtk2::Ex::Geo', $VERSION );
 }
 
